@@ -1,5 +1,3 @@
-david is een homo
-
 HS-code invoice tool
 Deze tool vult automatisch HS-codes in Excel-invoices.
 Wat doet de tool?
