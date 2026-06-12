@@ -1,3 +1,4 @@
+
 # HS-code invoice tool
 
 Deze tool vult automatisch HS-codes in Excel-invoices.
@@ -43,3 +44,6 @@ artikelnummer,hs_code
 ```
 
 De meegeleverde mapping is gemaakt op basis van het bestand `Artikeloverzicht compleet HS codes 12-5-2026`.
+
+
+
