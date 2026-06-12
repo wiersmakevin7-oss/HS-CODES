@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Editor
+.vs/
+.vscode/
+.idea/
+
+# Static assets (large files)
+static/
+
+# OS
+.DS_Store
+Thumbs.db
