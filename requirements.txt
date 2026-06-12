@@ -1,5 +1,9 @@
-openpyxl>=3.1.2
-pypdf>=4.0
-pypdfium2>=5.9
-rapidocr_onnxruntime>=1.4.4
-streamlit>=1.30
+# Use Python 3.10 for this project.
+# rapidocr_onnxruntime 1.4.4 currently requires Python <3.13.
+
+openpyxl>=3.1.2,<4
+pypdf>=4.0,<7
+pypdfium2>=5.9,<6
+rapidocr_onnxruntime==1.4.4
+streamlit>=1.30,<2
+pandas>=2.0,<3
