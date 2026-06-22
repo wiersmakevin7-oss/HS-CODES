@@ -33,7 +33,7 @@ ARTICLE_HEADERS = {
     "item no",
     "item no.",
 }
-HS_HEADERS = {"hs code", "hscode", "hs-code"}
+HS_HEADERS = {"hs code (artikellijst)", "hscode (artikellijst)", "hs-code (artikellijst)"}
 SIZE_HEADERS = {"size", "maat"}
 
 
@@ -153,6 +153,18 @@ def lookup_hs(mapping: Dict[str, str], article_value, size_value=None) -> Option
     return None
 
 
+def is_invoice_detail_row(ws, row_idx: int, article_col: int, size_col: Optional[int]) -> bool:
+    size_value = ws.cell(row_idx, size_col).value if size_col else None
+    color_col = size_col - 1 if size_col and size_col > article_col + 1 else None
+    color_value = ws.cell(row_idx, color_col).value if color_col else None
+    has_variant = bool(norm_text(size_value) or norm_text(color_value))
+    has_number = any(
+        isinstance(ws.cell(row_idx, col).value, (int, float))
+        for col in range(article_col + 1, ws.max_column + 1)
+    )
+    return has_variant and has_number
+
+
 def copy_cell_style(src, dst) -> None:
     if src.has_style:
         dst._style = copy(src._style)
@@ -167,12 +179,11 @@ def find_or_create_hs_col(ws, header_row: int, article_col: int, preferred_col: 
     if preferred_col:
         return preferred_col
 
-    col = article_col + 1
-    ws.insert_cols(col)
-    ws.cell(header_row, col).value = "HS code"
+    col = ws.max_column + 1
+    ws.cell(header_row, col).value = "HS code (artikellijst)"
 
     for row_idx in range(1, ws.max_row + 1):
-        copy_cell_style(ws.cell(row_idx, article_col), ws.cell(row_idx, col))
+        copy_cell_style(ws.cell(row_idx, col - 1), ws.cell(row_idx, col))
 
     article_letter = ws.cell(header_row, article_col).column_letter
     hs_letter = ws.cell(header_row, col).column_letter
@@ -187,25 +198,47 @@ def fill_invoice(input_xlsx: Path, output_xlsx: Path, mapping_csv: Path) -> dict
     total_filled = 0
     unmatched = []
 
-    for ws in wb.worksheets:
+    invoice_sheets = [ws for ws in wb.worksheets if ws.title.strip().lower() == "invoice"]
+    worksheets = invoice_sheets or wb.worksheets
+
+    for ws in worksheets:
         header_row, article_col, hs_col, size_col = find_headers(ws)
         if not header_row or not article_col:
             continue
+        created_hs_col = hs_col is None
         hs_col = find_or_create_hs_col(ws, header_row, article_col, hs_col)
+        if created_hs_col and size_col and size_col >= hs_col:
+            size_col += 1
+
+        current_article_value = None
 
         for r in range(header_row + 1, ws.max_row + 1):
             article_value = ws.cell(r, article_col).value
             article = norm_key(article_value)
-            if not article or article.startswith(("SUB TOTAL", "TOTAL", "EURO ", "N W", "NW", "G W", "GW", "NET WEIGHT", "GROSS WEIGHT")):
+            if norm_header(article_value) in ARTICLE_HEADERS:
+                current_article_value = None
+                continue
+
+            if article and article.startswith(("SUB TOTAL", "TOTAL", "EURO ", "N W", "NW", "G W", "GW", "NET WEIGHT", "GROSS WEIGHT")):
+                current_article_value = None
+                continue
+
+            if article and not article.startswith("="):
+                current_article_value = article_value
+            elif not is_invoice_detail_row(ws, r, article_col, size_col):
+                continue
+
+            lookup_article = current_article_value
+            if not norm_key(lookup_article):
                 continue
 
             size_value = ws.cell(r, size_col).value if size_col else None
-            hs = lookup_hs(mapping, article_value, size_value)
+            hs = lookup_hs(mapping, lookup_article, size_value)
             if hs:
                 ws.cell(r, hs_col).value = hs
                 total_filled += 1
             else:
-                unmatched.append({"sheet": ws.title, "row": r, "article": article_value})
+                unmatched.append({"sheet": ws.title, "row": r, "article": lookup_article})
 
     wb.save(output_xlsx)
     return {"filled": total_filled, "unmatched": unmatched[:100], "unmatched_count": len(unmatched)}
@@ -366,6 +399,192 @@ def find_product_code_bounds(header_line: str) -> Optional[Tuple[int, int]]:
     return start, max(end, start + 12)
 
 
+def extract_pdf_articles_left_of_order_no(
+    reader: PdfReader,
+    mapping: Dict[str, str],
+    patterns: List[Tuple[str, re.Pattern]],
+) -> List[dict]:
+    rows = []
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = get_pdf_page_text(page)
+        if is_packing_list_page(text):
+            continue
+
+        order_col: Optional[int] = None
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            header_match = re.search(r"\bORD\.?\s*NO\.?", line, flags=re.I)
+            if header_match and re.search(r"\bSIZE\b", line[: header_match.start()], flags=re.I):
+                order_col = header_match.start()
+                continue
+
+            if order_col is None or not norm_text(line):
+                continue
+
+            normalized_line = norm_key(line)
+            if normalized_line.startswith(("TOTAL", "AMOUNT", "DECLARATION", "THE EXPORTER", "NET WEIGHT", "GROSS WEIGHT")):
+                continue
+
+            left_of_order = line[:order_col].strip()
+            article = find_article_in_text(left_of_order, mapping, patterns)
+            if not article:
+                continue
+
+            rows.append(
+                {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article,
+                    "hs_code": mapping[article],
+                    "text": norm_text(line),
+                }
+            )
+
+    return rows
+
+
+def find_party_code_bounds(header_line: str) -> Optional[Tuple[int, int]]:
+    header_lower = header_line.lower()
+    match = re.search(r"party['’]s\s+code", header_lower)
+    if not match:
+        return None
+
+    start = max(0, match.start() - 2)
+    next_headers = [
+        header_lower.find("order no", match.end()),
+        header_lower.find("order number", match.end()),
+        header_lower.find("colour", match.end()),
+        header_lower.find("color", match.end()),
+    ]
+    next_headers = [idx for idx in next_headers if idx > match.start()]
+    end = min(next_headers) if next_headers else match.end() + 20
+    return start, max(end, start + 12)
+
+
+def find_buyer_product_code_bounds(header_line: str, next_line: str = "") -> Optional[Tuple[int, int]]:
+    buyer_match = re.search(r"\bbuyer\b", header_line, flags=re.I)
+    if not buyer_match:
+        return None
+
+    product_code_match = re.search(r"product\s+code", next_line, flags=re.I)
+    if not product_code_match or abs(product_code_match.start() - buyer_match.start()) > 10:
+        return None
+
+    start = max(0, min(buyer_match.start(), product_code_match.start()) - 4)
+    qty_match = re.search(r"\bqty\.?\b", header_line[buyer_match.end() :], flags=re.I)
+    if qty_match:
+        end = buyer_match.end() + qty_match.start()
+    else:
+        description_match = re.search(r"\bproduct\b", header_line[buyer_match.end() :], flags=re.I)
+        end = buyer_match.end() + description_match.start() if description_match else start + 24
+    return start, max(end, start + 14)
+
+
+def extract_pdf_articles_from_buyer_product_code_column(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    rows = []
+    last_bounds: Optional[Tuple[int, int]] = None
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = get_pdf_page_text(page)
+        if is_packing_list_page(text):
+            continue
+
+        lines = text.splitlines()
+        bounds = None
+        header_index = None
+        for idx, line in enumerate(lines):
+            next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
+            bounds = find_buyer_product_code_bounds(line, next_line)
+            if bounds:
+                header_index = idx + 1
+                last_bounds = bounds
+                break
+
+        if bounds is None or header_index is None:
+            if last_bounds is None:
+                continue
+            bounds = last_bounds
+            header_index = -1
+
+        start, end = bounds
+        for line_number, line in enumerate(lines[header_index + 1 :], start=header_index + 2):
+            if not norm_text(line):
+                continue
+
+            normalized_line = norm_key(line)
+            if normalized_line.startswith(("TOTAL", "GRAND TOTAL", "AMOUNT", "DECLARATION", "SIGNATURE", "NET WEIGHT", "GROSS WEIGHT")):
+                continue
+
+            cell = line[start:end].strip() if len(line) > start else ""
+            article = find_article_in_text(cell, mapping, []) or find_article_prefix(cell, mapping)
+            if not article:
+                continue
+
+            rows.append(
+                {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article,
+                    "hs_code": mapping[article],
+                    "text": norm_text(line),
+                }
+            )
+
+    return rows
+
+
+def extract_pdf_articles_from_party_code_column(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    rows = []
+    last_bounds: Optional[Tuple[int, int]] = None
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = get_pdf_page_text(page)
+        if is_packing_list_page(text):
+            continue
+
+        lines = text.splitlines()
+        bounds = None
+        header_index = None
+        for idx, line in enumerate(lines):
+            bounds = find_party_code_bounds(line)
+            if bounds:
+                header_index = idx
+                last_bounds = bounds
+                break
+
+        if bounds is None or header_index is None:
+            if last_bounds is None:
+                continue
+            bounds = last_bounds
+            header_index = -1
+
+        start, end = bounds
+        for line_number, line in enumerate(lines[header_index + 1 :], start=header_index + 2):
+            if not norm_text(line):
+                continue
+
+            normalized_line = norm_key(line)
+            if normalized_line.startswith(("TOTAL", "GRAND TOTAL", "AMOUNT", "DECLARATION", "SIGNATURE", "GSTIN", "PAN")):
+                continue
+
+            cell = line[start:end].strip() if len(line) > start else ""
+            article = find_article_in_text(cell, mapping, []) or find_article_prefix(cell, mapping)
+            if not article:
+                continue
+
+            rows.append(
+                {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article,
+                    "hs_code": mapping[article],
+                    "text": norm_text(line),
+                }
+            )
+
+    return rows
+
+
 def extract_pdf_articles_from_product_code_column(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
     rows = []
     seen = set()
@@ -468,7 +687,7 @@ def extract_pdf_articles_from_positions(
 
 def find_layout_article_bounds(header_line: str, next_line: str = "") -> Optional[Tuple[int, int]]:
     header_lower = header_line.lower()
-    match = re.search(r"article\s+(?:no\.?|number)", header_lower)
+    match = re.search(r"\b(?:article|art)\.?\s*(?:no\.?|number)\b", header_lower)
     if not match:
         article_match = re.search(r"\barticle\b", header_lower)
         if not article_match:
@@ -486,11 +705,12 @@ def find_layout_article_bounds(header_line: str, next_line: str = "") -> Optiona
 
         match = article_match
 
-    start = max(0, match.start() - 3)
+    short_art_header = bool(re.fullmatch(r"art\.?\s*no\.?", match.group(0), flags=re.I))
+    start = max(0, match.start() - (10 if short_art_header else 3))
     next_matches = [
         m.start()
         for m in re.finditer(
-            r"\b(qty|quantity|hsn|hs\s*code|price|amount|total|cartons?|ctn|pcs|description|desc)\b",
+            r"\b(item|qty|quantity|hsn|hs\s*code|price|amount|total|cartons?|ctn|pcs|description|desc)\b",
             header_lower[match.end() :],
         )
     ]
@@ -634,7 +854,13 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     mapping = load_mapping(mapping_csv)
     patterns = [(article, article_pattern(article)) for article in sorted(mapping, key=len, reverse=True)]
     reader = PdfReader(BytesIO(input_pdf.read_bytes()))
-    rows = extract_pdf_articles_from_product_code_column(reader, mapping)
+    buyer_product_rows = extract_pdf_articles_from_buyer_product_code_column(reader, mapping)
+    party_rows = extract_pdf_articles_from_party_code_column(reader, mapping)
+    product_rows = extract_pdf_articles_from_product_code_column(reader, mapping)
+    preferred_rows = max((buyer_product_rows, party_rows, product_rows), key=len)
+    if preferred_rows:
+        return preferred_rows
+    rows = extract_pdf_articles_left_of_order_no(reader, mapping, patterns)
     if rows:
         return rows
     rows = extract_pdf_articles_from_po_lines(reader, mapping)

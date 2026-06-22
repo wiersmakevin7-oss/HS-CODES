@@ -8,8 +8,8 @@ from fill_hs_codes import fill_invoice, fill_pdf_invoice
 st.set_page_config(page_title="HS-code invoice tool", layout="centered")
 st.title("HS-code invoice tool")
 st.write(
-    "Upload een Excel- of PDF-invoice. Bij Excel behoudt de tool de originele invoice en zet direct naast "
-    "**Article No.** een kolom **HS code** met de code uit de artikellijst. "
+    "Upload een Excel- of PDF-invoice. Bij Excel behoudt de tool de originele invoice en zet helemaal rechts "
+    "een kolom **HS code (artikellijst)** met de code op basis van het artikelnummer. "
     "Bij PDF maakt de tool een nieuwe Excel met de gevonden artikelregels en HS-codes. "
     "Gescande PDF's worden met OCR gelezen en kunnen iets langer duren. "
     "HSN-nummers uit de invoice worden niet gebruikt."
