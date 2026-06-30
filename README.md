@@ -1,105 +1,106 @@
-HS-code invoice tool
-Deze tool vult automatisch HS-codes in Excel-invoices.
-Wat doet de tool?
-Zoekt de kolom met `Article No.` / `Artikelnummer`.
-Zoekt of maakt de kolom `HS code`.
-Koppelt artikelnummer aan HS-code via `hs_mapping.csv`.
-Gebruikt geen HSN-codes uit de invoice.
-Maakt een nieuwe Excel-output; het originele bestand wordt niet overschreven.
-Kan ook PDF-invoices verwerken wanneer de PDF/OCR-dependencies correct zijn geïnstalleerd.
-Vereisten
-Gebruik Python 3.10
-> Let op: Python 3.13 of nieuwer wordt voor deze app niet aangeraden, omdat `rapidocr_onnxruntime` momenteel Python `<3.13` vereist. Met Python 3.13+ kan `pip install -r requirements.txt` daarom mislukken.
-Controleer je Python-versies in PowerShell:
+# HS-code invoice tool
+
+Streamlit-app om HS-codes op invoices aan te vullen op basis van artikelnummer.
+
+## Wat doet de tool?
+
+- Upload een Excel- of PDF-invoice.
+- Leest artikelcodes uit de invoice.
+- Zoekt per artikelcode de HS-code in `hs_mapping.csv`.
+- Gebruikt geen HSN-/HS-code uit de invoice zelf.
+- Excel-upload: behoudt de originele workbook en zet rechts een kolom `HS code (artikellijst)`.
+- PDF-upload: maakt een nieuwe Excel met artikelcode, artikelnaam, HS-code, aantallen, waarde, totaalwaarde en PDF-controletext.
+- Zet onder PDF-exports een rij `Factuur waarde` met de totale waarde.
+
+## Projectbestanden
+
+Voor deployment moeten deze bestanden in de GitHub-repository staan:
+
+- `app.py`
+- `fill_hs_codes.py`
+- `hs_mapping.csv`
+- `requirements.txt`
+- `.streamlit/config.toml`
+
+## Lokaal starten
+
+Gebruik Python 3.12.
+
 ```powershell
-py --list
-python --version
-```
-Als Python 3.10 nog niet geïnstalleerd is, installeer die dan vanaf python.org en vink tijdens installatie Add python.exe to PATH aan.
-Eerste installatie op Windows / PowerShell
-Open PowerShell in deze projectmap en voer daarna uit:
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+cd "C:\Users\KevinWiersmaTeamFrei\OneDrive - TFF & Logistics\Documenten\HS Code brands of q\hs_code_tool"
 python -m pip install -r requirements.txt
-```
-Start daarna de app met:
-```powershell
 python -m streamlit run app.py
 ```
-Gebruik bij voorkeur `python -m streamlit` in plaats van alleen `streamlit`, omdat dit altijd dezelfde Python-omgeving gebruikt waarin de packages zijn geïnstalleerd.
-Als PowerShell de virtual environment blokkeert
-Krijg je een melding dat scripts niet mogen worden uitgevoerd? Voer dan één keer uit:
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-Activeer daarna opnieuw:
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-Dagelijks starten
-Als de installatie al eerder is gedaan, hoef je meestal alleen dit te doen:
-```powershell
-cd "C:\Users\EelcoHansmaTeamFreig\OneDrive - TFF & Logistics\Documenten\HS-CODES"
-.\.venv\Scripts\Activate.ps1
-python -m streamlit run app.py
-```
-Daarna opent Streamlit meestal automatisch in je browser. Zo niet, kopieer dan de lokale URL uit de terminal, meestal iets zoals:
+
+Open daarna:
+
 ```text
 http://localhost:8501
 ```
-Gebruiken als upload-tool
-Start de app met `python -m streamlit run app.py`.
-Upload je invoice.
-Download de versie met HS-codes.
-Gebruiken via command line
-Voor Excel-invoices kun je de tool ook direct via de command line gebruiken:
-```powershell
-python fill_hs_codes.py "invoice.xlsx" "invoice_met_HS_codes.xlsx"
+
+## Streamlit Community Cloud deployment
+
+1. Push de laatste versie naar GitHub.
+2. Ga naar `https://share.streamlit.io`.
+3. Klik op `Create app`.
+4. Kies `Yup, I have an app`.
+5. Selecteer repository:
+
+```text
+wiersmakevin7-oss/HS-CODES
 ```
-Artikeloverzicht bijwerken
-Vervang `hs_mapping.csv` door een nieuwe mapping met minimaal deze kolommen:
+
+6. Selecteer branch:
+
+```text
+main
+```
+
+7. Selecteer main file path:
+
+```text
+app.py
+```
+
+8. Open `Advanced settings`.
+9. Kies Python versie:
+
+```text
+3.12
+```
+
+10. Secrets zijn niet nodig voor deze app.
+11. Klik op `Deploy`.
+
+Streamlit Community Cloud leest automatisch `requirements.txt` en installeert de packages. De app krijgt daarna een link op `streamlit.app` die je met collega's kunt delen.
+
+## Privacy
+
+Facturen worden bij gebruik van Streamlit Community Cloud geupload naar een externe cloudomgeving. Gebruik dit alleen als dat intern is toegestaan voor jullie invoice-, klant- en prijsinformatie.
+
+## Artikeloverzicht bijwerken
+
+Vervang `hs_mapping.csv` door een nieuwe CSV met minimaal:
+
 ```csv
-artikelnummer,hs_code
-7300 ZW 38,64039110
+artikelnummer,omschrijving,hs_code
+7300 ZW 38,Rijbroek voorbeeld,64039110
 ```
-De meegeleverde mapping is gemaakt op basis van het bestand `Artikeloverzicht compleet HS codes 12-5-2026`.
-Problemen oplossen
-`streamlit` is not recognized
-Start Streamlit via Python:
+
+## Veelvoorkomende problemen
+
+### `ModuleNotFoundError`
+
+Controleer of `requirements.txt` is geinstalleerd:
+
 ```powershell
-python -m streamlit run app.py
-```
-Als dat ook niet werkt, installeer de dependencies opnieuw in de actieve virtual environment:
-```powershell
-.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python -m streamlit run app.py
 ```
-`ModuleNotFoundError: No module named 'openpyxl'` of `No module named 'pypdf'`
-De dependencies zijn niet geïnstalleerd in de Python-omgeving waarmee je de app start. Activeer de virtual environment en installeer opnieuw:
-```powershell
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m streamlit run app.py
-```
-Fout bij `rapidocr_onnxruntime`
-Controleer eerst je Python-versie:
-```powershell
-python --version
-```
-Gebruik Python 3.12. Verwijder daarna eventueel de oude virtual environment en maak die opnieuw:
-```powershell
-Remove-Item -Recurse -Force .venv
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m streamlit run app.py
-```
-Controleren welke Python wordt gebruikt
-```powershell
-python -c "import sys; print(sys.executable)"
-python -m pip show openpyxl pypdf streamlit rapidocr_onnxruntime
-```
+
+### PDF wordt niet goed gelezen
+
+De tool ondersteunt meerdere invoice-layouts. Als een nieuwe leverancier niet goed wordt gelezen, voeg een voorbeeld-PDF toe en breid de parser in `fill_hs_codes.py` uit.
+
+### OCR/PDF dependencies
+
+`rapidocr_onnxruntime` wordt gebruikt voor gescande PDF's. Gebruik Python 3.12, omdat nieuwere Python-versies niet altijd door alle OCR-dependencies worden ondersteund.
