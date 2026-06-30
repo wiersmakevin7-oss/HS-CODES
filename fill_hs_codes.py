@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
 from pypdf import PdfReader
 
 ARTICLE_HEADERS = {
@@ -78,19 +79,106 @@ def norm_size(value) -> str:
     return text
 
 
-def load_mapping(mapping_csv: Path) -> Dict[str, str]:
+def load_catalog(mapping_csv: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
     mapping: Dict[str, str] = {}
+    names: Dict[str, str] = {}
+
+    def add_mapping_alias(alias: str, hs: str, name: str = "") -> None:
+        alias = norm_key(alias)
+        if not alias or not hs:
+            return
+        mapping.setdefault(alias, hs)
+        if name:
+            names.setdefault(alias, name)
+        compact_alias = compact_key(alias)
+        if compact_alias:
+            mapping.setdefault(compact_alias, hs)
+            if name:
+                names.setdefault(compact_alias, name)
+
     with mapping_csv.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             article = norm_key(row.get("artikelnummer") or row.get("article") or row.get("article_no"))
+            name = norm_text(row.get("omschrijving") or row.get("description") or row.get("article_name"))
             hs = norm_hs(row.get("hs_code") or row.get("HS code") or row.get("hs"))
             if article and hs:
-                mapping[article] = hs
-                compact_article = compact_key(article)
-                if compact_article:
-                    mapping[compact_article] = hs
+                add_mapping_alias(article, hs, name)
+
+                variant = re.sub(r"\s+\d{1,3}(?:-\d{1,3})?$", "", article).strip()
+                if variant and variant != article and len(variant.split()) >= 2:
+                    variant_name = re.sub(r"\s+\d{1,3}(?:-\d{1,3})?$", "", name).strip()
+                    add_mapping_alias(variant, hs, variant_name)
+    return mapping, names
+
+
+def load_mapping(mapping_csv: Path) -> Dict[str, str]:
+    mapping, _names = load_catalog(mapping_csv)
     return mapping
+
+
+def extract_pdf_quantity_amount(text: str) -> Tuple[str, str, str]:
+    # Matrix invoices can contain many size/order numbers on the left. The invoice
+    # totals requested by the user live in the right-hand quantity/amount columns.
+    right_side = (text or "")[180:]
+    numbers = re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", right_side)
+    if len(numbers) < 3:
+        return "", "", ""
+
+    qty, _unit_price, amount = numbers[-3:]
+    return qty.replace(",", ""), _unit_price, amount
+
+
+def extract_pdf_quantity_amount_for_article(text: str, article: str) -> Tuple[str, str, str]:
+    raw_text = text or ""
+    article_regex = re.escape(norm_text(article)).replace(r"\ ", r"\s+")
+    match = re.search(rf"^\s*{article_regex}\s+(?P<quantity>\d+)\b", raw_text, flags=re.I)
+    numbers = re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", raw_text)
+    if match and len(numbers) >= 2:
+        return match.group("quantity"), numbers[-2], numbers[-1]
+    return extract_pdf_quantity_amount(raw_text)
+
+
+def enrich_pdf_rows(rows: List[dict], names: Dict[str, str]) -> List[dict]:
+    for row in rows:
+        article = row.get("article", "")
+        lookup_article = row.get("lookup_article", article)
+        quantity = row.get("quantity", "")
+        unit_price = row.get("unit_price", "")
+        amount = row.get("amount", "")
+        if not (quantity and unit_price and amount):
+            quantity, unit_price, amount = extract_pdf_quantity_amount_for_article(
+                row.get("raw_text") or row.get("text", ""),
+                article,
+            )
+        row["article_name"] = (
+            names.get(article)
+            or names.get(compact_key(article))
+            or names.get(lookup_article)
+            or names.get(compact_key(lookup_article))
+            or ""
+        )
+        row["quantity"] = quantity
+        row["unit_price"] = unit_price
+        row["amount"] = amount
+
+    return rows
+
+
+def article_group_key(article: str) -> str:
+    match = re.search(r"\b\d{3,5}\b", norm_key(article))
+    return match.group(0) if match else norm_key(article)
+
+
+def parse_pdf_number(value: str):
+    text = re.sub(r"[^0-9.\-]", "", norm_text(value).replace(",", ""))
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except ValueError:
+        return value
+    return int(number) if number.is_integer() else number
 
 
 def article_pattern(article: str) -> re.Pattern:
@@ -330,6 +418,23 @@ def find_article_prefix(value: str, mapping: Dict[str, str]) -> Optional[str]:
     return None
 
 
+def display_article_code(value: str, lookup_article: str) -> str:
+    lookup = norm_key(lookup_article)
+    if not lookup:
+        return lookup_article
+
+    candidates = re.findall(
+        r"\b\d{3,5}(?:\s+[A-Z]{1,6})?(?:\s+\d{1,3}(?:-\d{1,3})?)?\b",
+        norm_key(value),
+        flags=re.I,
+    )
+    for candidate in candidates:
+        candidate = norm_key(candidate)
+        if len(candidate) > len(lookup) and compact_key(candidate).startswith(compact_key(lookup)):
+            return candidate
+    return lookup_article
+
+
 def extract_article_before_po(text: str, mapping: Dict[str, str]) -> Optional[str]:
     before_po = re.split(r"\bPO\s*#", text, flags=re.I)[0]
     candidates = re.findall(r"\b[A-Z]?\d{3,5}(?:\s*[A-Z]{2,6})?(?:\s*\d{1,3}(?:-\d{1,3})?)?\b", before_po, flags=re.I)
@@ -370,13 +475,139 @@ def extract_pdf_articles_from_po_lines(reader: PdfReader, mapping: Dict[str, str
                             {
                                 "page": page_number,
                                 "line": line_number,
-                                "article": article,
+                                "article": display_article_code(combined, article),
+                                "lookup_article": article,
                                 "hs_code": mapping[article],
                                 "text": remove_po_number(combined),
                             }
                         )
 
             previous_line = clean_line
+
+    return rows
+
+
+def extract_pdf_articles_from_equi_style(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    rows = []
+    line_pattern = re.compile(
+        r"^\s*(?P<article>\d{3,5}\s+[A-Z]{1,6}\s+\d{1,3}[A-Z]?)\s+"
+        r"(?P<quantity>\d+)\s+.+?\s+"
+        r"(?P<unit_price>\d+(?:\.\d+)?)\s+"
+        r"(?P<amount>\d+(?:,\d{3})*(?:\.\d+)?)\s*$"
+    )
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = get_pdf_page_text(page)
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            match = line_pattern.match(line)
+            if not match:
+                continue
+
+            article = norm_key(match.group("article"))
+            hs = mapping.get(article) or mapping.get(compact_key(article))
+            if not hs:
+                continue
+
+            rows.append(
+                {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article,
+                    "lookup_article": article,
+                    "hs_code": hs,
+                    "quantity": match.group("quantity"),
+                    "unit_price": match.group("unit_price"),
+                    "amount": match.group("amount"),
+                    "raw_text": line,
+                    "text": norm_text(line),
+                }
+            )
+
+    return rows
+
+
+def extract_pdf_articles_from_shipment_columns(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    rows = []
+    seen = set()
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(page.extract_text(layout=True) or page.extract_text() or "" for page in pdf.pages)
+        if not re.search(r"QUANTITY\s*\(PCS\).*UNIT\s+PRICE.*AMOUNT", full_text, flags=re.I | re.S):
+            return []
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text(layout=True) or page.extract_text() or ""
+            if is_packing_list_page(text):
+                continue
+
+            words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
+            order_words = [
+                word
+                for word in words
+                if re.fullmatch(r"\d{6}", word["text"])
+                and float(word["x0"]) < 70
+            ]
+
+            for order_word in order_words:
+                top = float(order_word["top"])
+                row_words = [
+                    word
+                    for word in words
+                    if top - 8 <= float(word["top"]) <= top + 12
+                ]
+
+                def column_text(left: float, right: float) -> str:
+                    selected = [
+                        word
+                        for word in row_words
+                        if left <= float(word["x0"]) <= right
+                    ]
+                    selected.sort(key=lambda word: float(word["x0"]))
+                    return norm_text(" ".join(word["text"] for word in selected))
+
+                article = norm_key(column_text(90, 150))
+                quantity = norm_text(column_text(300, 360))
+                unit_price = norm_text(column_text(370, 430))
+                amount = norm_text(column_text(435, 540))
+
+                if not re.fullmatch(r"[A-Z]?\d{3,5}\s+[A-Z]{1,6}\s+[A-Z0-9.]+", article):
+                    continue
+
+                hs = mapping.get(article) or mapping.get(compact_key(article))
+                if not hs:
+                    continue
+
+                key = (page_number, round(top), article)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                full_row_text = " ".join(
+                    word["text"]
+                    for word in sorted(row_words, key=lambda word: (float(word["x0"]), float(word["top"])))
+                )
+                rows.append(
+                    {
+                        "page": page_number,
+                        "line": int(top),
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                        "quantity": re.sub(r"\D", "", quantity),
+                        "unit_price": unit_price,
+                        "amount": amount,
+                        "raw_text": full_row_text,
+                        "text": norm_text(full_row_text),
+                    }
+                )
 
     return rows
 
@@ -434,8 +665,10 @@ def extract_pdf_articles_left_of_order_no(
                 {
                     "page": page_number,
                     "line": line_number,
-                    "article": article,
+                    "article": display_article_code(left_of_order, article),
+                    "lookup_article": article,
                     "hs_code": mapping[article],
+                    "raw_text": line,
                     "text": norm_text(line),
                 }
             )
@@ -524,8 +757,10 @@ def extract_pdf_articles_from_buyer_product_code_column(reader: PdfReader, mappi
                 {
                     "page": page_number,
                     "line": line_number,
-                    "article": article,
+                    "article": display_article_code(cell, article),
+                    "lookup_article": article,
                     "hs_code": mapping[article],
+                    "raw_text": line,
                     "text": norm_text(line),
                 }
             )
@@ -576,8 +811,10 @@ def extract_pdf_articles_from_party_code_column(reader: PdfReader, mapping: Dict
                 {
                     "page": page_number,
                     "line": line_number,
-                    "article": article,
+                    "article": display_article_code(cell, article),
+                    "lookup_article": article,
                     "hs_code": mapping[article],
+                    "raw_text": line,
                     "text": norm_text(line),
                 }
             )
@@ -633,8 +870,10 @@ def extract_pdf_articles_from_product_code_column(reader: PdfReader, mapping: Di
                 {
                     "page": page_number,
                     "line": line_number,
-                    "article": article,
+                    "article": display_article_code(cell, article),
+                    "lookup_article": article,
                     "hs_code": mapping[article],
+                    "raw_text": line,
                     "text": norm_text(line),
                 }
             )
@@ -676,7 +915,8 @@ def extract_pdf_articles_from_positions(
                     {
                         "page": page_number,
                         "line": line_number,
-                        "article": matched_article,
+                        "article": display_article_code(column_text, matched_article),
+                        "lookup_article": matched_article,
                         "hs_code": mapping[matched_article],
                         "text": line["text"],
                     }
@@ -764,8 +1004,10 @@ def extract_pdf_articles_from_layout(
                     {
                         "page": page_number,
                         "line": line_number,
-                        "article": matched_article,
+                        "article": display_article_code(article_cell, matched_article),
+                        "lookup_article": matched_article,
                         "hs_code": mapping[matched_article],
+                        "raw_text": line,
                         "text": norm_text(line),
                     }
                 )
@@ -839,7 +1081,8 @@ def extract_pdf_articles_from_ocr(input_pdf: Path, mapping: Dict[str, str]) -> L
                     {
                         "page": page_number + 1,
                         "line": int(y_min),
-                        "article": article,
+                        "article": display_article_code(raw_text, article),
+                        "lookup_article": article,
                         "hs_code": mapping[article],
                         "text": raw_text,
                     }
@@ -851,28 +1094,31 @@ def extract_pdf_articles_from_ocr(input_pdf: Path, mapping: Dict[str, str]) -> L
 
 
 def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
-    mapping = load_mapping(mapping_csv)
+    mapping, names = load_catalog(mapping_csv)
     patterns = [(article, article_pattern(article)) for article in sorted(mapping, key=len, reverse=True)]
     reader = PdfReader(BytesIO(input_pdf.read_bytes()))
+    rows = extract_pdf_articles_from_shipment_columns(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
     buyer_product_rows = extract_pdf_articles_from_buyer_product_code_column(reader, mapping)
     party_rows = extract_pdf_articles_from_party_code_column(reader, mapping)
     product_rows = extract_pdf_articles_from_product_code_column(reader, mapping)
     preferred_rows = max((buyer_product_rows, party_rows, product_rows), key=len)
     if preferred_rows:
-        return preferred_rows
+        return enrich_pdf_rows(preferred_rows, names)
     rows = extract_pdf_articles_left_of_order_no(reader, mapping, patterns)
     if rows:
-        return rows
+        return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_po_lines(reader, mapping)
     if rows:
-        return rows
+        return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_positions(reader, mapping, patterns)
     if rows:
-        return rows
+        return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_layout(reader, mapping, patterns)
     if rows:
-        return rows
-    return extract_pdf_articles_from_ocr(input_pdf, mapping)
+        return enrich_pdf_rows(rows, names)
+    return enrich_pdf_rows(extract_pdf_articles_from_ocr(input_pdf, mapping), names)
 
 
 def fill_pdf_invoice(input_pdf: Path, output_xlsx: Path, mapping_csv: Path) -> dict:
@@ -880,15 +1126,88 @@ def fill_pdf_invoice(input_pdf: Path, output_xlsx: Path, mapping_csv: Path) -> d
     wb = Workbook()
     ws = wb.active
     ws.title = "HS codes"
-    ws.append(["Page", "Article No.", "HS code", "PDF text"])
+    ws.append(
+        [
+            "Page",
+            "Article No.",
+            "Article name",
+            "HS code",
+            "Aantallen",
+            "Waarde",
+            "Totaal waarde",
+            "PDF text",
+        ]
+    )
+
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(color="FFFFFF", bold=True)
+    group_fills = [
+        PatternFill("solid", fgColor="EAF3F8"),
+        PatternFill("solid", fgColor="FCE4D6"),
+        PatternFill("solid", fgColor="E2F0D9"),
+        PatternFill("solid", fgColor="FFF2CC"),
+        PatternFill("solid", fgColor="EADCF8"),
+        PatternFill("solid", fgColor="DDEBF7"),
+    ]
+    group_fill_by_key: Dict[str, PatternFill] = {}
+
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
 
     for row in rows:
-        ws.append([row["page"], row["article"], row["hs_code"], row["text"]])
+        ws.append(
+            [
+                row["page"],
+                row["article"],
+                row.get("article_name", ""),
+                row["hs_code"],
+                parse_pdf_number(row.get("quantity", "")),
+                parse_pdf_number(row.get("unit_price", "")),
+                parse_pdf_number(row.get("amount", "")),
+                row["text"],
+            ]
+        )
+        excel_row = ws.max_row
+        group_key = article_group_key(row.get("article", ""))
+        if group_key not in group_fill_by_key:
+            group_fill_by_key[group_key] = group_fills[len(group_fill_by_key) % len(group_fills)]
+        row_fill = group_fill_by_key[group_key]
+
+        for col_idx in range(1, 9):
+            ws.cell(excel_row, col_idx).fill = row_fill
+
+        if row.get("quantity") or row.get("unit_price") or row.get("amount"):
+            for col_idx in range(5, 8):
+                ws.cell(excel_row, col_idx).font = Font(bold=True)
+            ws.cell(excel_row, 5).number_format = "#,##0"
+            ws.cell(excel_row, 6).number_format = "#,##0.00"
+            ws.cell(excel_row, 7).number_format = "#,##0.00"
+
+    if rows:
+        total_row = ws.max_row + 1
+        invoice_total = sum(
+            float(ws.cell(row_idx, 7).value or 0)
+            for row_idx in range(2, total_row)
+            if isinstance(ws.cell(row_idx, 7).value, (int, float))
+        )
+        ws.cell(total_row, 6).value = "Factuur waarde"
+        ws.cell(total_row, 7).value = invoice_total
+        total_fill = PatternFill("solid", fgColor="D9EAD3")
+        for col_idx in range(1, 9):
+            cell = ws.cell(total_row, col_idx)
+            cell.fill = total_fill
+            cell.font = Font(bold=True)
+        ws.cell(total_row, 7).number_format = "#,##0.00"
 
     ws.column_dimensions["A"].width = 10
     ws.column_dimensions["B"].width = 22
-    ws.column_dimensions["C"].width = 16
-    ws.column_dimensions["D"].width = 100
+    ws.column_dimensions["C"].width = 38
+    ws.column_dimensions["D"].width = 16
+    ws.column_dimensions["E"].width = 20
+    ws.column_dimensions["F"].width = 16
+    ws.column_dimensions["G"].width = 16
+    ws.column_dimensions["H"].width = 100
     wb.save(output_xlsx)
     return {"filled": len(rows), "unmatched": [], "unmatched_count": 0}
 
