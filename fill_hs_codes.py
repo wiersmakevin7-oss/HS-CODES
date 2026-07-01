@@ -33,6 +33,8 @@ ARTICLE_HEADERS = {
     "buyer article no.",
     "item no",
     "item no.",
+    "qhp item no",
+    "qhp item no.",
 }
 HS_HEADERS = {"hs code (artikellijst)", "hscode (artikellijst)", "hs-code (artikellijst)"}
 SIZE_HEADERS = {"size", "maat"}
@@ -301,6 +303,10 @@ def fill_invoice(input_xlsx: Path, output_xlsx: Path, mapping_csv: Path) -> dict
         current_article_value = None
 
         for r in range(header_row + 1, ws.max_row + 1):
+            row_text = norm_key(" ".join(norm_text(ws.cell(r, col).value) for col in range(1, ws.max_column + 1)))
+            if "HS INFORMATION" in row_text or "H S INFORMATION" in row_text or "HSINFORMATION" in row_text:
+                break
+
             article_value = ws.cell(r, article_col).value
             article = norm_key(article_value)
             if norm_header(article_value) in ARTICLE_HEADERS:
