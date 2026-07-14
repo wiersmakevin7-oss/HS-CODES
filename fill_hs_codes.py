@@ -148,7 +148,7 @@ def enrich_pdf_rows(rows: List[dict], names: Dict[str, str]) -> List[dict]:
         quantity = row.get("quantity", "")
         unit_price = row.get("unit_price", "")
         amount = row.get("amount", "")
-        if not (quantity and unit_price and amount):
+        if not (quantity and unit_price and amount) and not row.get("skip_value_fallback"):
             quantity, unit_price, amount = extract_pdf_quantity_amount_for_article(
                 row.get("raw_text") or row.get("text", ""),
                 article,
@@ -173,9 +173,20 @@ def article_group_key(article: str) -> str:
 
 
 def parse_pdf_number(value: str):
-    text = re.sub(r"[^0-9.\-]", "", norm_text(value).replace(",", ""))
+    text = re.sub(r"[^0-9,.\-]", "", norm_text(value))
     if not text:
         return ""
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        parts = text.split(",")
+        if len(parts) == 2 and len(parts[1]) == 3 and len(parts[0]) <= 3:
+            text = text.replace(",", "")
+        else:
+            text = text.replace(",", ".")
     try:
         number = float(text)
     except ValueError:
@@ -551,7 +562,7 @@ def extract_pdf_articles_from_shipment_columns(input_pdf: Path, mapping: Dict[st
 
         for page_number, page in enumerate(pdf.pages, start=1):
             text = page.extract_text(layout=True) or page.extract_text() or ""
-            if is_packing_list_page(text):
+            if is_packing_list_page(text) and not re.search(r"Our\s+Product\s+Code\s+Party'?s\s+Code\s+Order\s+No", text, flags=re.I):
                 continue
 
             words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
@@ -618,6 +629,485 @@ def extract_pdf_articles_from_shipment_columns(input_pdf: Path, mapping: Dict[st
     return rows
 
 
+def extract_pdf_articles_from_tarun_thermoware(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    rows = []
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(page.extract_text(layout=True) or page.extract_text() or "" for page in pdf.pages)
+        if not re.search(r"Tarun\s+Thermoware", full_text, flags=re.I):
+            return []
+        if not re.search(r"Our\s+Product\s+Code\s+Party'?s\s+Code", full_text, flags=re.I):
+            return []
+
+        article_re = re.compile(
+            r"(?P<article>[A-Z]?\d{3,6}(?:\s+[A-Z]{1,4})?(?:\s+[A-Z0-9]{1,4})?)\s+105364\b",
+            flags=re.I,
+        )
+        total_re = re.compile(
+            r"(?P<total_quantity>\d+)\s*(?:Pair|Pcs\.?)\s+"
+            r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
+            r"(?P<amount>\d[\d,]*(?:\.\d{2})?)",
+            flags=re.I,
+        )
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text(layout=True) or page.extract_text() or ""
+            if is_packing_list_page(text) and not re.search(r"Our\s+Product\s+Code\s+Party'?s\s+Code\s+Order\s+No", text, flags=re.I):
+                continue
+
+            words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
+            lines = group_pdf_lines(
+                [{"text": word["text"], "x": float(word["x0"]), "source_x": float(word["x0"]), "y": -float(word["top"])} for word in words],
+                y_tolerance=3,
+            )
+
+            for line in lines:
+                text_line = norm_text(" ".join(word["text"] for word in line["words"]))
+                article_match = article_re.search(text_line)
+                if not article_match:
+                    continue
+
+                article = norm_key(article_match.group("article"))
+                hs = mapping.get(article) or mapping.get(compact_key(article))
+                if not hs:
+                    continue
+
+                after_article = text_line[article_match.end() :]
+                total_match = total_re.search(after_article)
+                quantity_text = after_article[: total_match.start()] if total_match else after_article
+                numbers_before_total = re.findall(r"\d+(?:[,.]\d+)?", quantity_text)
+                if not numbers_before_total:
+                    continue
+
+                row = {
+                    "page": page_number,
+                    "line": int(-line["y"]),
+                    "article": article,
+                    "lookup_article": article,
+                    "hs_code": hs,
+                    "quantity": numbers_before_total[-1],
+                    "skip_value_fallback": True,
+                    "raw_text": text_line,
+                    "text": text_line,
+                }
+                if total_match:
+                    row["unit_price"] = total_match.group("unit_price")
+                    row["amount"] = total_match.group("amount")
+                rows.append(row)
+
+    return rows
+
+
+def extract_pdf_articles_from_ibrahim_buyer_code(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    rows = []
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(page.extract_text(layout=True) or page.extract_text() or "" for page in pdf.pages)
+        if not re.search(r"IBRAHIM\s+INTERNATIONAL", full_text, flags=re.I):
+            return []
+        if not re.search(r"Our\s+Code\s+&\s+Name\s+Buyer\s+Code", full_text, flags=re.I):
+            return []
+
+        buyer_code_re = re.compile(
+            r"(?P<article>\d{3,5}\s+[A-Z]{1,6}(?:\s+\d+)?)\s+105342\b",
+            flags=re.I,
+        )
+        total_re = re.compile(
+            r"(?P<total_quantity>\d+)\s*(?:Pcs|Pair|Prs)\s+"
+            r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
+            r"(?P<amount>\d[\d,]*(?:\.\d{2})?)",
+            flags=re.I,
+        )
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text(layout=True) or page.extract_text() or ""
+            if is_packing_list_page(text) and not re.search(r"Our\s+Product\s+Code\s+Party'?s\s+Code\s+Order\s+No", text, flags=re.I):
+                continue
+
+            words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
+            lines = group_pdf_lines(
+                [{"text": word["text"], "x": float(word["x0"]), "source_x": float(word["x0"]), "y": -float(word["top"])} for word in words],
+                y_tolerance=3,
+            )
+
+            for line in lines:
+                text_line = norm_text(" ".join(word["text"] for word in line["words"]))
+                article_match = buyer_code_re.search(text_line)
+                if not article_match:
+                    continue
+
+                article = norm_key(article_match.group("article"))
+                hs = mapping.get(article) or mapping.get(compact_key(article))
+                if not hs:
+                    continue
+
+                after_article = text_line[article_match.end() :]
+                total_match = total_re.search(after_article)
+                quantity_text = after_article[: total_match.start()] if total_match else after_article
+                numbers_before_total = re.findall(r"\d+(?:[,.]\d+)?", quantity_text)
+                if not numbers_before_total:
+                    continue
+
+                row = {
+                    "page": page_number,
+                    "line": int(-line["y"]),
+                    "article": article,
+                    "lookup_article": article,
+                    "hs_code": hs,
+                    "quantity": numbers_before_total[-1],
+                    "skip_value_fallback": True,
+                    "raw_text": text_line,
+                    "text": text_line,
+                }
+                if total_match:
+                    row["unit_price"] = total_match.group("unit_price")
+                    row["amount"] = total_match.group("amount")
+                rows.append(row)
+
+    return rows
+
+
+def extract_pdf_articles_from_mark_equestrian_party_code(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    rows = []
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(page.extract_text(layout=True) or page.extract_text() or "" for page in pdf.pages)
+        if not re.search(r"MARK\s+EQUESTRIAN", full_text, flags=re.I):
+            return []
+        if not re.search(r"Our\s+Product\s+Code\s+Party'?s\s+Code\s+Order\s+No", full_text, flags=re.I):
+            return []
+
+        party_code_re = re.compile(
+            r"(?P<article>\d{3,5}\s+[A-Z]{2,6}\s+\d{2,3})\s+502516\b",
+            flags=re.I,
+        )
+        quantity_re = re.compile(r"\b(?:Child|child)\s+(?P<quantity>\d+)(?:\s+\d+\s*Pcs|\s*\d*Pcs)?\b")
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text(layout=True) or page.extract_text() or ""
+            if is_packing_list_page(text) and not re.search(r"Our\s+Product\s+Code\s+Party'?s\s+Code\s+Order\s+No", text, flags=re.I):
+                continue
+
+            words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
+            lines = group_pdf_lines(
+                [{"text": word["text"], "x": float(word["x0"]), "source_x": float(word["x0"]), "y": -float(word["top"])} for word in words],
+                y_tolerance=3,
+            )
+
+            for line in lines:
+                text_line = norm_text(" ".join(word["text"] for word in line["words"]))
+                article_match = party_code_re.search(text_line)
+                if not article_match:
+                    continue
+
+                article = norm_key(article_match.group("article"))
+                hs = mapping.get(article) or mapping.get(compact_key(article))
+                if not hs:
+                    continue
+
+                quantity = ""
+                quantity_match = quantity_re.search(text_line[article_match.end() :])
+                if quantity_match:
+                    quantity = quantity_match.group("quantity")
+
+                rows.append(
+                    {
+                        "page": page_number,
+                        "line": int(-line["y"]),
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                        "quantity": quantity,
+                        "skip_value_fallback": True,
+                        "raw_text": text_line,
+                        "text": text_line,
+                    }
+                )
+
+    return rows
+
+
+def extract_pdf_articles_from_panache_exports(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    rows = []
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(page.extract_text(layout=True) or page.extract_text() or "" for page in pdf.pages)
+        if not re.search(r"PANACHE\s+EXPORTS", full_text, flags=re.I):
+            return []
+        if not re.search(r"Order\s+No\.\s+Article\s+No\.\s+HSN\s+CODE", full_text, flags=re.I):
+            return []
+        if not re.search(r"QUANTITY\s+RATE\s+AMOUNT", full_text, flags=re.I):
+            return []
+
+        article_line_re = re.compile(
+            r"^\s*(?P<order>\d{6})\s+(?P<article>[A-Z]?\d{3,6})\b\s+"
+            r"(?:(?P<hsn>\d{7,10})\s+)?(?P<rest>.+)$",
+            flags=re.I,
+        )
+        amount_re = re.compile(
+            r"(?P<quantity>\d+)\s+(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
+            r"(?P<amount>\d[\d.]*[,.]\d{2})\s*$"
+        )
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text(layout=True) or page.extract_text() or ""
+            if is_packing_list_page(text):
+                continue
+
+            words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
+            lines = group_pdf_lines(
+                [{"text": word["text"], "x": float(word["x0"]), "source_x": float(word["x0"]), "y": -float(word["top"])} for word in words],
+                y_tolerance=3,
+            )
+            current = None
+
+            for line in lines:
+                text_line = norm_text(" ".join(word["text"] for word in line["words"]))
+                if not text_line or re.search(r"TOTAL\s+PCS", text_line, flags=re.I):
+                    continue
+
+                article_match = article_line_re.match(text_line)
+                if article_match:
+                    article = norm_key(article_match.group("article"))
+                    hs = mapping.get(article) or mapping.get(compact_key(article))
+                    current = {
+                        "page": page_number,
+                        "line": int(-line["y"]),
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                    } if hs else None
+
+                amount_match = amount_re.search(text_line)
+                if not amount_match or not current:
+                    continue
+
+                row = dict(current)
+                row["quantity"] = amount_match.group("quantity")
+                row["unit_price"] = amount_match.group("unit_price")
+                row["amount"] = amount_match.group("amount")
+                row["raw_text"] = text_line
+                row["text"] = text_line
+                rows.append(row)
+
+    return rows
+
+
+def extract_pdf_articles_from_silverline_rows(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    full_text = "\n".join(get_pdf_page_text(page) for page in reader.pages)
+    if not re.search(r"SILVERLINE\s+TACK\s+INC", full_text, flags=re.I):
+        return []
+    if not re.search(r"Description\s+of\s+Goods.*HSN.*Quantity.*Rate.*Amount", full_text, flags=re.I | re.S):
+        return []
+
+    rows = []
+    line_pattern = re.compile(
+        r"^\s*(?P<article>\d{3,5}\s+[A-Z]{1,6}\s+[A-Z0-9]+)\s+.+?\s+"
+        r"(?P<hsn>\d{4})\s+(?P<net_weight>\d+(?:\.\d+)?)\s+"
+        r"(?P<quantity>\d+)\s+(?:PCS|PAIR)\s+"
+        r"(?P<unit_price>\d+(?:\.\d+)?)\s+"
+        r"(?P<amount>\d[\d,]*(?:\.\d{2})?)\s*$",
+        flags=re.I,
+    )
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = get_pdf_page_text(page)
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            match = line_pattern.match(line)
+            if not match:
+                continue
+
+            article = norm_key(match.group("article"))
+            hs = mapping.get(article) or mapping.get(compact_key(article))
+            if not hs:
+                continue
+
+            rows.append(
+                {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article,
+                    "lookup_article": article,
+                    "hs_code": hs,
+                    "quantity": match.group("quantity"),
+                    "unit_price": match.group("unit_price"),
+                    "amount": match.group("amount"),
+                    "raw_text": line,
+                    "text": norm_text(line),
+                }
+            )
+
+    return rows
+
+
+def extract_pdf_articles_from_rafah_matrix(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    rows = []
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(page.extract_text(layout=True) or page.extract_text() or "" for page in pdf.pages)
+        if not re.search(r"Rafah\s+International", full_text, flags=re.I):
+            return []
+        if not re.search(r"Description\s+Of\s+Goods.*Qty.*Rate.*Amount", full_text, flags=re.I | re.S):
+            return []
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text(layout=True) or page.extract_text() or ""
+            if is_packing_list_page(text):
+                continue
+
+            words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
+            article_lines = []
+            value_rows = []
+
+            for line in group_pdf_lines(
+                [{"text": word["text"], "x": float(word["x0"]), "source_x": float(word["x0"]), "y": -float(word["top"])} for word in words],
+                y_tolerance=3,
+            ):
+                line_words = line["words"]
+                text_line = norm_text(" ".join(word["text"] for word in line_words))
+                article_match = re.match(r"^(?P<article>\d{3,5}\s+[A-Z]{1,6})\b", text_line)
+                if article_match and re.search(r"\d+\s*/\s*\d+", text_line):
+                    article = norm_key(article_match.group("article"))
+                    size_qty_pairs = re.findall(r"\b\d+[A-Z]?\s*/\s*(\d+)\b", text_line)
+                    quantity = sum(int(qty) for qty in size_qty_pairs)
+                    article_lines.append({"article": article, "quantity": quantity, "text": text_line, "line": int(-line["y"])})
+
+                right_numbers = [
+                    word["text"]
+                    for word in sorted(line_words, key=lambda item: item["x"])
+                    if word["x"] > 430 and re.fullmatch(r"\d[\d,]*(?:\.\d+)?", word["text"])
+                ]
+                if len(right_numbers) >= 3:
+                    qty, unit_price, amount = right_numbers[-3:]
+                    value_rows.append({"quantity": int(qty.replace(",", "")), "unit_price": unit_price, "amount": amount})
+
+            for article_line in article_lines:
+                value_row = next((row for row in value_rows if row["quantity"] == article_line["quantity"]), None)
+                if not value_row:
+                    continue
+
+                article = article_line["article"]
+                hs = mapping.get(article) or mapping.get(compact_key(article))
+                if not hs:
+                    continue
+
+                rows.append(
+                    {
+                        "page": page_number,
+                        "line": article_line["line"],
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                        "quantity": str(value_row["quantity"]),
+                        "unit_price": value_row["unit_price"],
+                        "amount": value_row["amount"],
+                        "raw_text": article_line["text"],
+                        "text": article_line["text"],
+                    }
+                )
+
+    return rows
+
+
+def extract_pdf_articles_from_item_code_rows(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    full_text = "\n".join(get_pdf_page_text(page) for page in reader.pages)
+    if not re.search(r"ITEM\s+DESCRIPTION\s+ITEM\s+CODE", full_text, flags=re.I):
+        return []
+
+    rows = []
+    article_re = re.compile(r"\b(?P<article>\d{3,5}\s+[A-Z]{2,6}(?:\s+\d+)?)\b")
+
+    def find_hs(article: str, line: str) -> Tuple[Optional[str], str]:
+        article = norm_key(article)
+        candidates = [article]
+        mm_match = re.search(r"\b\d+\s*MM\b", line, flags=re.I)
+        if mm_match:
+            candidates.insert(0, norm_key(f"{article} {mm_match.group(0)}"))
+
+        for candidate in candidates:
+            hs = mapping.get(candidate) or mapping.get(compact_key(candidate))
+            if hs:
+                return hs, candidate
+
+        compact_article = compact_key(article)
+        prefixed = [
+            key
+            for key in mapping
+            if len(key) > len(article) and compact_key(key).startswith(compact_article)
+        ]
+        if len(set(prefixed)) == 1:
+            key = prefixed[0]
+            return mapping[key], key
+        return None, article
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = get_pdf_page_text(page)
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not re.search(r"\bPCS\b", line, flags=re.I):
+                continue
+            article_match = article_re.search(line)
+            qty_match = re.search(r"(?P<quantity>\d+)\s*PCS\b", line, flags=re.I)
+            if not article_match or not qty_match:
+                continue
+
+            after_pcs = line[qty_match.end() :]
+            numbers = re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", after_pcs)
+            if len(numbers) < 2:
+                continue
+
+            hs, lookup_article = find_hs(article_match.group("article"), line)
+            if not hs:
+                continue
+
+            rows.append(
+                {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": lookup_article,
+                    "lookup_article": lookup_article,
+                    "hs_code": hs,
+                    "quantity": qty_match.group("quantity"),
+                    "unit_price": numbers[0],
+                    "amount": numbers[-1],
+                    "raw_text": line,
+                    "text": norm_text(line),
+                }
+            )
+
+    return rows
+
+
 def extract_pdf_articles_from_brading_grouped_totals(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
     rows = []
     amount_pattern = re.compile(
@@ -656,6 +1146,58 @@ def extract_pdf_articles_from_brading_grouped_totals(reader: PdfReader, mapping:
             row["quantity"] = amount_match.group("quantity")
             row["unit_price"] = amount_match.group("unit_price")
             row["amount"] = amount_match.group("amount")
+            row["raw_text"] = norm_text(f"{current.get('raw_text', '')} {line}")
+            row["text"] = norm_text(f"{current.get('text', '')} {line}")
+            rows.append(row)
+            current = None
+
+    return rows
+
+
+def extract_pdf_articles_from_kartikeya_grouped_totals(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    full_text = "\n".join(get_pdf_page_text(page) for page in reader.pages)
+    if not re.search(r"Kartikeya\s+International", full_text, flags=re.I):
+        return []
+    if not re.search(r"Our\s+Product\s+Code.*Quantity.*Rate.*Amount", full_text, flags=re.I | re.S):
+        return []
+
+    rows = []
+    current = None
+    article_pattern_re = re.compile(r"^\s*(?P<article>\d{3,5})\b")
+    amount_pattern = re.compile(
+        r"(?P<quantity>\d[\d,]*)\s*pc\s+(?P<unit_price>\d+(?:\.\d+)?)\s+(?P<amount>\d[\d,]*(?:\.\d{2})?)\s*$",
+        flags=re.I,
+    )
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = get_pdf_page_text(page)
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            article_match = article_pattern_re.match(line)
+            if article_match:
+                article = norm_key(article_match.group("article"))
+                hs = mapping.get(article) or mapping.get(compact_key(article))
+                if hs:
+                    current = {
+                        "page": page_number,
+                        "line": line_number,
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                        "raw_text": line,
+                        "text": norm_text(line),
+                    }
+
+            amount_match = amount_pattern.search(line)
+            if not amount_match or not current:
+                continue
+
+            row = dict(current)
+            row["quantity"] = amount_match.group("quantity").replace(",", "")
+            row["unit_price"] = amount_match.group("unit_price")
+            row["amount"] = amount_match.group("amount").replace(",", "")
             row["raw_text"] = norm_text(f"{current.get('raw_text', '')} {line}")
             row["text"] = norm_text(f"{current.get('text', '')} {line}")
             rows.append(row)
@@ -1149,10 +1691,34 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     mapping, names = load_catalog(mapping_csv)
     patterns = [(article, article_pattern(article)) for article in sorted(mapping, key=len, reverse=True)]
     reader = PdfReader(BytesIO(input_pdf.read_bytes()))
+    rows = extract_pdf_articles_from_mark_equestrian_party_code(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_ibrahim_buyer_code(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_tarun_thermoware(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_panache_exports(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_shipment_columns(input_pdf, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_silverline_rows(reader, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_rafah_matrix(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_item_code_rows(reader, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_brading_grouped_totals(reader, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_kartikeya_grouped_totals(reader, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
     buyer_product_rows = extract_pdf_articles_from_buyer_product_code_column(reader, mapping)
