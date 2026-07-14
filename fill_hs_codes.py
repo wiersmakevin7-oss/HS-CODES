@@ -618,6 +618,52 @@ def extract_pdf_articles_from_shipment_columns(input_pdf: Path, mapping: Dict[st
     return rows
 
 
+def extract_pdf_articles_from_brading_grouped_totals(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    rows = []
+    amount_pattern = re.compile(
+        r"(?P<quantity>\d+)\s+\D*(?P<unit_price>\d+\.\d+)\s+\D*(?P<amount>\d[\d,]*\.\d{2})\s*$"
+    )
+    article_pattern_re = re.compile(r"^\s*(?P<order>\d{6})\s+(?P<article>\d{3,5})\b")
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = get_pdf_page_text(page)
+        if is_packing_list_page(text):
+            continue
+        if page_number == 1 and not re.search(r"Order\s+Article\s+Item.*Total\s+Price\s+Amount", text, flags=re.I | re.S):
+            continue
+
+        current = None
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            article_match = article_pattern_re.match(line)
+            if article_match:
+                article = norm_key(article_match.group("article"))
+                hs = mapping.get(article) or mapping.get(compact_key(article))
+                current = {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article,
+                    "lookup_article": article,
+                    "hs_code": hs,
+                    "raw_text": line,
+                    "text": norm_text(line),
+                } if hs else None
+
+            amount_match = amount_pattern.search(line)
+            if not amount_match or not current:
+                continue
+
+            row = dict(current)
+            row["quantity"] = amount_match.group("quantity")
+            row["unit_price"] = amount_match.group("unit_price")
+            row["amount"] = amount_match.group("amount")
+            row["raw_text"] = norm_text(f"{current.get('raw_text', '')} {line}")
+            row["text"] = norm_text(f"{current.get('text', '')} {line}")
+            rows.append(row)
+            current = None
+
+    return rows
+
+
 def find_product_code_bounds(header_line: str) -> Optional[Tuple[int, int]]:
     header_lower = header_line.lower()
     start = header_lower.find("our product code")
@@ -1104,6 +1150,9 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     patterns = [(article, article_pattern(article)) for article in sorted(mapping, key=len, reverse=True)]
     reader = PdfReader(BytesIO(input_pdf.read_bytes()))
     rows = extract_pdf_articles_from_shipment_columns(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_brading_grouped_totals(reader, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
     buyer_product_rows = extract_pdf_articles_from_buyer_product_code_column(reader, mapping)
