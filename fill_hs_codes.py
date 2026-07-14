@@ -719,7 +719,7 @@ def extract_pdf_articles_from_ibrahim_buyer_code(input_pdf: Path, mapping: Dict[
             return []
 
         buyer_code_re = re.compile(
-            r"(?P<article>\d{3,5}\s+[A-Z]{1,6}(?:\s+\d+)?)\s+105342\b",
+            r"(?P<article>\d{3,5}\s+[A-Z]{1,6}(?:\s+\d+)?)\s+\d{6}\b",
             flags=re.I,
         )
         total_re = re.compile(
@@ -731,7 +731,7 @@ def extract_pdf_articles_from_ibrahim_buyer_code(input_pdf: Path, mapping: Dict[
 
         for page_number, page in enumerate(pdf.pages, start=1):
             text = page.extract_text(layout=True) or page.extract_text() or ""
-            if is_packing_list_page(text) and not re.search(r"Our\s+Product\s+Code\s+Party'?s\s+Code\s+Order\s+No", text, flags=re.I):
+            if is_packing_list_page(text) and not re.search(r"Our\s+Code\s+&\s+Name\s+Buyer\s+Code", text, flags=re.I):
                 continue
 
             words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
