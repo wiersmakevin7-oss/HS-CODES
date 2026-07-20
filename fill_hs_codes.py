@@ -842,6 +842,170 @@ def extract_pdf_articles_from_mark_equestrian_party_code(input_pdf: Path, mappin
     return rows
 
 
+def extract_pdf_articles_from_leather_art_variants(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    def variant_size_code(value: str) -> str:
+        text = norm_key(value)
+        text = re.sub(r"\b(CM|CMS|PONY|COB|FULL|XFULL|X-FULL|EX-FULL|EXFULL|SHET|SHETLAND)\b", " ", text)
+        text = re.sub(r"[^A-Z0-9-]+", " ", text).strip()
+        parts = text.split()
+        return parts[0] if parts else ""
+
+    def lookup_variant(base_article: str, color: str, size: str) -> Tuple[str, Optional[str]]:
+        base_article = norm_key(base_article)
+        color = norm_key(color)
+        size = norm_key(size)
+        candidates = []
+        if base_article in mapping or compact_key(base_article) in mapping:
+            candidates.append(base_article)
+        if color:
+            if size:
+                candidates.insert(0, norm_key(f"{base_article} {color} {size}"))
+            candidates.append(norm_key(f"{base_article} {color}"))
+        candidates.append(base_article)
+
+        for candidate in candidates:
+            hs = mapping.get(candidate) or mapping.get(compact_key(candidate))
+            if hs:
+                return candidate, hs
+        return base_article, None
+
+    def flush_current(current: Optional[dict], variants: List[str]) -> None:
+        if not current:
+            return
+
+        rate = float(parse_pdf_number(current["unit_price"]) or 0)
+        emitted = False
+        for variant in variants:
+            variant_match = re.match(r"^\((?P<color>[A-Z]+)\s+(?P<body>.+)\)$", norm_text(variant), flags=re.I)
+            if not variant_match:
+                continue
+
+            color = variant_match.group("color")
+            for part in variant_match.group("body").split(","):
+                part = norm_text(part)
+                qty_match = re.search(r"/\s*(?P<quantity>\d+)\b", part)
+                if not qty_match:
+                    continue
+
+                quantity = qty_match.group("quantity")
+                size = variant_size_code(part[: qty_match.start()])
+                article, hs = lookup_variant(current["base_article"], color, size)
+                if not hs:
+                    continue
+
+                amount = float(quantity) * rate if rate else ""
+                rows.append(
+                    {
+                        "page": current["page"],
+                        "line": current["line"],
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                        "quantity": quantity,
+                        "unit_price": current["unit_price"],
+                        "amount": f"{amount:.2f}" if amount != "" else "",
+                        "skip_value_fallback": True,
+                        "raw_text": norm_text(f"{current['raw_text']} {variant}"),
+                        "text": norm_text(f"{current['raw_text']} {variant}"),
+                    }
+                )
+                emitted = True
+
+        if emitted:
+            return
+
+        article, hs = lookup_variant(current["base_article"], "", "")
+        if not hs:
+            return
+        rows.append(
+            {
+                "page": current["page"],
+                "line": current["line"],
+                "article": article,
+                "lookup_article": article,
+                "hs_code": hs,
+                "quantity": current["quantity"],
+                "unit_price": current["unit_price"],
+                "amount": current["amount"],
+                "skip_value_fallback": True,
+                "raw_text": current["raw_text"],
+                "text": current["raw_text"],
+            }
+        )
+
+    rows = []
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(page.extract_text(layout=True) or page.extract_text() or "" for page in pdf.pages)
+        if not re.search(r"\bLEATHER\s+ART\b", full_text, flags=re.I):
+            return []
+        if not re.search(r"PARTS\s+OF\s+(?:NON-)?LEATHER\s+HARNESS\s+GOODS", full_text, flags=re.I):
+            return []
+
+        product_re = re.compile(
+            r"^\s*(?P<serial>\d+)\.\s+"
+            r"(?P<article>[A-Z]?\d{3,5}(?:\s+[A-Z]{1,6}(?:\s+\d+(?:-\d+)?)?)?)\s+"
+            r"(?P<quantity>\d+)\s+(?:PCS|PRS)\.?\s+"
+            r"(?P<unit_price>\d+(?:\.\d+)?)\s+"
+            r"(?P<amount>\d[\d,]*(?:\.\d{2})?)",
+            flags=re.I,
+        )
+        variant_re = re.compile(r"^\([A-Z]+\s+.+/\d+.*\)$", flags=re.I)
+        stop_re = re.compile(r"^(Group Total|Invoice Total|Grand Total|TOTAL CARTON)", flags=re.I)
+
+        current = None
+        variants: List[str] = []
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text(layout=True) or page.extract_text() or ""
+            if is_packing_list_page(text):
+                continue
+
+            words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
+            lines = group_pdf_lines(
+                [{"text": word["text"], "x": float(word["x0"]), "source_x": float(word["x0"]), "y": -float(word["top"])} for word in words],
+                y_tolerance=3,
+            )
+
+            for line in lines:
+                text_line = norm_text(" ".join(word["text"] for word in line["words"]))
+                if not text_line:
+                    continue
+
+                product_match = product_re.match(text_line)
+                if product_match:
+                    flush_current(current, variants)
+                    current = {
+                        "page": page_number,
+                        "line": int(-line["y"]),
+                        "base_article": norm_key(product_match.group("article")),
+                        "quantity": product_match.group("quantity"),
+                        "unit_price": product_match.group("unit_price"),
+                        "amount": product_match.group("amount"),
+                        "raw_text": text_line,
+                    }
+                    variants = []
+                    continue
+
+                if current and variant_re.match(text_line):
+                    variants.append(text_line)
+                    continue
+
+                if current and stop_re.match(text_line):
+                    flush_current(current, variants)
+                    current = None
+                    variants = []
+
+        flush_current(current, variants)
+
+    return rows
+
+
 def extract_pdf_articles_from_panache_exports(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
     try:
         import pdfplumber
@@ -1691,6 +1855,9 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     mapping, names = load_catalog(mapping_csv)
     patterns = [(article, article_pattern(article)) for article in sorted(mapping, key=len, reverse=True)]
     reader = PdfReader(BytesIO(input_pdf.read_bytes()))
+    rows = extract_pdf_articles_from_leather_art_variants(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_mark_equestrian_party_code(input_pdf, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
