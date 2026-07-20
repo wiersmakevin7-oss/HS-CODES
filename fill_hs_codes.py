@@ -42,10 +42,15 @@ SIZE_HEADERS = {"size", "maat"}
 
 
 def create_rapidocr_engine():
+    rapidocr_error = None
     try:
-        from rapidocr_onnxruntime import RapidOCR
-    except ImportError:
         from rapidocr import RapidOCR
+    except Exception as exc:
+        rapidocr_error = exc
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except Exception as fallback_exc:
+            raise ImportError(f"rapidocr: {rapidocr_error}; rapidocr_onnxruntime: {fallback_exc}") from fallback_exc
 
     return RapidOCR()
 
