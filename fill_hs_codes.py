@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import re
+import runpy
 import sys
 from copy import copy
 from io import BytesIO
@@ -2390,6 +2391,10 @@ def fill_pdf_invoice(input_pdf: Path, output_xlsx: Path, mapping_csv: Path) -> d
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        runpy.run_path(str(Path(__file__).with_name("app.py")), run_name="__main__")
+        raise SystemExit(0)
+
     if len(sys.argv) not in (3, 4):
         print("Gebruik: python fill_hs_codes.py invoice.xlsx output.xlsx [hs_mapping.csv]")
         raise SystemExit(2)
