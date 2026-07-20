@@ -644,10 +644,6 @@ def extract_pdf_articles_from_tarun_thermoware(input_pdf: Path, mapping: Dict[st
         if not re.search(r"Our\s+Product\s+Code\s+Party'?s\s+Code", full_text, flags=re.I):
             return []
 
-        article_re = re.compile(
-            r"(?P<article>[A-Z]?\d{3,6}(?:\s+[A-Z]{1,4})?(?:\s+[A-Z0-9]{1,4})?)\s+105364\b",
-            flags=re.I,
-        )
         total_re = re.compile(
             r"(?P<total_quantity>\d+)\s*(?:Pair|Pcs\.?)\s+"
             r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
@@ -666,39 +662,69 @@ def extract_pdf_articles_from_tarun_thermoware(input_pdf: Path, mapping: Dict[st
                 y_tolerance=3,
             )
 
-            for line in lines:
-                text_line = norm_text(" ".join(word["text"] for word in line["words"]))
-                article_match = article_re.search(text_line)
-                if not article_match:
+            page_rows = []
+            for index, line in enumerate(lines):
+                line_words = sorted(line["words"], key=lambda word: word["x"])
+                text_line = norm_text(" ".join(word["text"] for word in line_words))
+                article_part = norm_text(" ".join(word["text"] for word in line_words if 120 <= word["x"] <= 180))
+                if not article_part:
                     continue
 
-                article = norm_key(article_match.group("article"))
+                order_part = norm_text(" ".join(word["text"] for word in line_words if 180 <= word["x"] <= 230))
+                if not re.fullmatch(r"\d{6}", order_part):
+                    continue
+
+                article = find_article_in_text(article_part, mapping, [])
+                if not article and index + 1 < len(lines):
+                    next_words = sorted(lines[index + 1]["words"], key=lambda word: word["x"])
+                    next_left = norm_text(" ".join(word["text"] for word in next_words if 120 <= word["x"] <= 180))
+                    next_order = norm_text(" ".join(word["text"] for word in next_words if 180 <= word["x"] <= 230))
+                    if next_left and not next_order:
+                        article = find_article_in_text(f"{article_part} {next_left}", mapping, [])
+                        if article:
+                            text_line = norm_text(f"{text_line} {next_left}")
+                            article_part = norm_text(f"{article_part} {next_left}")
+                if not article:
+                    continue
+
                 hs = mapping.get(article) or mapping.get(compact_key(article))
                 if not hs:
                     continue
 
-                after_article = text_line[article_match.end() :]
-                total_match = total_re.search(after_article)
-                quantity_text = after_article[: total_match.start()] if total_match else after_article
-                numbers_before_total = re.findall(r"\d+(?:[,.]\d+)?", quantity_text)
-                if not numbers_before_total:
+                qty_part = norm_text(" ".join(word["text"] for word in line_words if 400 <= word["x"] <= 430))
+                qty_match = re.search(r"\d+", qty_part)
+                if not qty_match:
                     continue
 
+                total_text = norm_text(" ".join(word["text"] for word in line_words if word["x"] >= 430))
+                total_match = total_re.search(total_text)
                 row = {
                     "page": page_number,
                     "line": int(-line["y"]),
-                    "article": article,
+                    "article": canonical_article_key(article, mapping),
                     "lookup_article": article,
                     "hs_code": hs,
-                    "quantity": numbers_before_total[-1],
+                    "quantity": qty_match.group(0),
+                    "unit_price": "",
+                    "amount": "",
                     "skip_value_fallback": True,
                     "raw_text": text_line,
                     "text": text_line,
                 }
+                page_rows.append(row)
+
                 if total_match:
-                    row["unit_price"] = total_match.group("unit_price")
-                    row["amount"] = total_match.group("amount")
-                rows.append(row)
+                    rate = parse_pdf_number(total_match.group("unit_price"))
+                    if isinstance(rate, (int, float)):
+                        for pending in reversed(page_rows):
+                            if pending.get("unit_price"):
+                                break
+                            quantity = parse_pdf_number(pending.get("quantity", ""))
+                            if isinstance(quantity, (int, float)):
+                                pending["unit_price"] = total_match.group("unit_price")
+                                pending["amount"] = round(float(quantity) * float(rate), 2)
+
+            rows.extend(page_rows)
 
     return rows
 
@@ -1002,6 +1028,301 @@ def extract_pdf_articles_from_leather_art_variants(input_pdf: Path, mapping: Dic
                     variants = []
 
         flush_current(current, variants)
+
+    return rows
+
+
+def extract_pdf_articles_from_gng_pet_rows(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    if not re.search(r"\bGNG\s+PET\b", full_text, flags=re.I):
+        return []
+    if not re.search(r"Art\.?\s*No\.?\s+Item\s+Order\s+No\.?\s+Size\s+Colour\s+Pcs\s+Rate\s+Amount", full_text, flags=re.I):
+        return []
+
+    rows = []
+    line_re = re.compile(
+        r"^(?P<article>[A-Z]?\d{3,5}\s+[A-Z]{2,6}\s+[A-Z0-9]+)\s+.+?\s+"
+        r"(?P<order>\d{6})\s+.+?\s+"
+        r"(?P<quantity>\d+)\s+"
+        r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
+        r"(?P<amount>\d[\d.]*,\d{2})",
+        flags=re.I,
+    )
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            text_line = norm_text(line).replace("\ufffd", "").strip()
+            match = line_re.match(text_line)
+            if not match:
+                continue
+
+            article = norm_key(match.group("article"))
+            hs = mapping.get(article) or mapping.get(compact_key(article))
+            if not hs:
+                continue
+
+            rows.append(
+                {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article,
+                    "lookup_article": article,
+                    "hs_code": hs,
+                    "quantity": match.group("quantity"),
+                    "unit_price": match.group("unit_price"),
+                    "amount": match.group("amount"),
+                    "skip_value_fallback": True,
+                    "raw_text": text_line,
+                    "text": text_line,
+                }
+            )
+
+    return rows
+
+
+def extract_pdf_articles_from_changzhou_ziyuan_rows(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    if not re.search(r"CHANGZHOU\s+ZIYUAN\s+SPORTS", full_text, flags=re.I):
+        return []
+    if not re.search(r"ITEM\s+NO\.?\s+DESCRIPTIONS\s+QUANTITIES\s+FOB\s+SHANGHAI\s+AMOUNT", full_text, flags=re.I):
+        return []
+
+    rows = []
+    line_re = re.compile(
+        r"^(?:(?P<carton>[A-Z]{0,4}\d[A-Z0-9-]*)\s+)?"
+        r"(?P<order>\d{6})\s+"
+        r"(?P<item_text>.+?)\s+"
+        r"(?P<quantity>\d+)\s+"
+        r"US\$?(?P<unit_price>\d[\d,.]*)\s+"
+        r"US\$?(?P<amount>\d[\d,.]*)$",
+        flags=re.I,
+    )
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            text_line = norm_text(line)
+            match = line_re.match(text_line)
+            if not match:
+                continue
+
+            lookup_article = find_article_prefix(match.group("item_text"), mapping)
+            if not lookup_article:
+                continue
+
+            hs = mapping.get(lookup_article) or mapping.get(compact_key(lookup_article))
+            if not hs:
+                continue
+
+            article = canonical_article_key(lookup_article, mapping)
+            rows.append(
+                {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article,
+                    "lookup_article": lookup_article,
+                    "hs_code": hs,
+                    "quantity": match.group("quantity"),
+                    "unit_price": match.group("unit_price"),
+                    "amount": match.group("amount"),
+                    "skip_value_fallback": True,
+                    "raw_text": text_line,
+                    "text": text_line,
+                }
+            )
+
+    return rows
+
+
+def extract_pdf_articles_from_karan_letex_rows(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    rows = []
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(page.extract_text(layout=True) or page.extract_text() or "" for page in pdf.pages)
+        if not re.search(r"KARAN\s+LETEX\s+LTD", full_text, flags=re.I):
+            return []
+        if not re.search(r"Knitted\s+Man\s+Made\s+Breeches", full_text, flags=re.I):
+            return []
+
+        line_re = re.compile(
+            r"Knitted\s+Man\s+Made\s+Breeches\s+-\s+Ladies\s+"
+            r"(?P<article>\d{3,5}\s+[A-Z]{2,6}\s+\d{2,3})\s+"
+            r"(?P<quantity>\d+)\s*Pcs\.?\s+"
+            r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
+            r"(?P<amount>\d[\d,]*(?:\.\d{2})?)",
+            flags=re.I,
+        )
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text(layout=True) or page.extract_text() or ""
+            if is_packing_list_page(text):
+                continue
+
+            words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
+            lines = group_pdf_lines(
+                [{"text": word["text"], "x": float(word["x0"]), "source_x": float(word["x0"]), "y": -float(word["top"])} for word in words],
+                y_tolerance=3,
+            )
+
+            for line in lines:
+                text_line = norm_text(" ".join(word["text"] for word in line["words"]))
+                match = line_re.search(text_line)
+                if not match:
+                    continue
+
+                article = norm_key(match.group("article"))
+                hs = mapping.get(article) or mapping.get(compact_key(article))
+                if not hs:
+                    continue
+
+                rows.append(
+                    {
+                        "page": page_number,
+                        "line": int(-line["y"]),
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                        "quantity": match.group("quantity"),
+                        "unit_price": match.group("unit_price"),
+                        "amount": match.group("amount"),
+                        "skip_value_fallback": True,
+                        "raw_text": text_line,
+                        "text": text_line,
+                    }
+                )
+
+    return rows
+
+
+def canonical_article_key(article: str, mapping: Dict[str, str]) -> str:
+    compact = compact_key(article)
+    matches = [key for key in mapping if compact_key(key) == compact]
+    spaced = [key for key in matches if " " in key]
+    if spaced:
+        return min(spaced, key=len)
+    return matches[0] if matches else article
+
+
+def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    if any(norm_text(get_pdf_page_text(page)) for page in reader.pages):
+        return []
+
+    try:
+        import pypdfium2 as pdfium
+        from rapidocr_onnxruntime import RapidOCR
+    except ImportError:
+        return []
+
+    rows = []
+    seen = set()
+    document = pdfium.PdfDocument(str(input_pdf))
+    ocr = RapidOCR()
+    amount_re = re.compile(r"\d[\d,]*(?:\.\d{2})")
+    qty_re = re.compile(r"(?P<quantity>\d+)\s*(?:PCS|PRS)\b", flags=re.I)
+
+    def find_compact_article(value: str) -> Optional[str]:
+        compact = compact_key(value)
+        if not compact:
+            return None
+        for article in sorted(mapping, key=lambda item: len(compact_key(item)), reverse=True):
+            article_compact = compact_key(article)
+            if len(article_compact) >= 4 and compact.startswith(article_compact):
+                return article
+        return None
+
+    try:
+        for page_number in range(len(document)):
+            page = document[page_number]
+            try:
+                image = page.render(scale=1.25).to_pil()
+            finally:
+                if hasattr(page, "close"):
+                    page.close()
+
+            width, height = image.size
+            crop_top = int(height * 0.38)
+            table_image = image.crop((0, crop_top, width, int(height * 0.82)))
+            result, _elapsed = ocr(table_image)
+            words = []
+
+            for box, text, confidence in result or []:
+                if confidence < 0.35:
+                    continue
+                raw_text = norm_text(text)
+                if not raw_text:
+                    continue
+                xs = [point[0] for point in box]
+                ys = [point[1] + crop_top for point in box]
+                words.append(
+                    {
+                        "text": raw_text,
+                        "x": min(xs),
+                        "source_x": min(xs),
+                        "y": -min(ys),
+                    }
+                )
+
+            for line in group_pdf_lines(words, y_tolerance=8):
+                line_words = sorted(line["words"], key=lambda item: item["x"])
+                text_line = norm_text(" ".join(word["text"] for word in line_words))
+                if not text_line or text_line.upper().startswith(("ORDER", "SUB", "TOTAL", "AMOUNT", "GOOD")):
+                    continue
+
+                left_text = norm_text(" ".join(word["text"] for word in line_words if word["x"] < width * 0.60))
+                article = find_compact_article(left_text) or find_article_prefix(left_text, mapping)
+                if not article:
+                    article = find_compact_article(text_line) or find_article_prefix(text_line, mapping)
+                if not article:
+                    continue
+
+                qty_match = qty_re.search(text_line)
+                if not qty_match:
+                    continue
+
+                after_qty = text_line[qty_match.end() :]
+                numbers = amount_re.findall(after_qty)
+                if len(numbers) < 2:
+                    continue
+
+                article = canonical_article_key(article, mapping)
+                hs = mapping.get(article) or mapping.get(compact_key(article))
+                if not hs:
+                    continue
+
+                key = (page_number + 1, round(-line["y"] / 8), article, qty_match.group("quantity"))
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                rows.append(
+                    {
+                        "page": page_number + 1,
+                        "line": int(-line["y"]),
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                        "quantity": qty_match.group("quantity"),
+                        "unit_price": numbers[-2],
+                        "amount": numbers[-1],
+                        "skip_value_fallback": True,
+                        "raw_text": text_line,
+                        "text": text_line,
+                    }
+                )
+    finally:
+        document.close()
 
     return rows
 
@@ -1856,6 +2177,18 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     patterns = [(article, article_pattern(article)) for article in sorted(mapping, key=len, reverse=True)]
     reader = PdfReader(BytesIO(input_pdf.read_bytes()))
     rows = extract_pdf_articles_from_leather_art_variants(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_gng_pet_rows(reader, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_changzhou_ziyuan_rows(reader, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_karan_letex_rows(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_maharaja_scan(input_pdf, reader, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_mark_equestrian_party_code(input_pdf, mapping)
