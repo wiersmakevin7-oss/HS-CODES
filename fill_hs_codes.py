@@ -1157,7 +1157,7 @@ def extract_pdf_articles_from_karan_letex_rows(input_pdf: Path, mapping: Dict[st
             return []
 
         line_re = re.compile(
-            r"Knitted\s+Man\s+Made\s+Breeches\s+-\s+Ladies\s+"
+            r"Knitted\s+Man\s+Made\s+Breeches\s+-\s+(?:Ladies|Girls)\s+"
             r"(?P<article>\d{3,5}\s+[A-Z]{2,6}\s+\d{2,3})\s+"
             r"(?P<quantity>\d+)\s*Pcs\.?\s+"
             r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
@@ -1231,13 +1231,25 @@ def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, 
     ocr = RapidOCR()
     amount_re = re.compile(r"\d[\d,]*(?:\.\d{2})")
     qty_re = re.compile(r"(?P<quantity>\d+)\s*(?:PCS|PRS)\b", flags=re.I)
+    compact_articles = sorted(
+        [(article, compact_key(article)) for article in mapping],
+        key=lambda item: len(item[1]),
+        reverse=True,
+    )
+
+    def normalize_maharaja_ocr_text(value: str) -> str:
+        text = norm_text(value).replace("'", "")
+        text = re.sub(r"\b[Ss](\d{3})\b", r"5\1", text)
+        text = re.sub(r"\b(\d{3,5})\s+[2Zz][Ww]\b", r"\1 ZW", text)
+        text = re.sub(r"\b([2Zz][Ww])\s+([A-Z0-9])", r"ZW \2", text)
+        text = re.sub(r"\b(\d{3,5}\s+[A-Z]{1,6})\s+O\b", r"\1 0", text, flags=re.I)
+        return norm_text(text)
 
     def find_compact_article(value: str) -> Optional[str]:
-        compact = compact_key(value)
+        compact = compact_key(normalize_maharaja_ocr_text(value))
         if not compact:
             return None
-        for article in sorted(mapping, key=lambda item: len(compact_key(item)), reverse=True):
-            article_compact = compact_key(article)
+        for article, article_compact in compact_articles:
             if len(article_compact) >= 4 and compact.startswith(article_compact):
                 return article
         return None
@@ -1246,19 +1258,19 @@ def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, 
         for page_number in range(len(document)):
             page = document[page_number]
             try:
-                image = page.render(scale=1.25).to_pil()
+                image = page.render(scale=0.9).to_pil()
             finally:
                 if hasattr(page, "close"):
                     page.close()
 
             width, height = image.size
-            crop_top = int(height * 0.38)
-            table_image = image.crop((0, crop_top, width, int(height * 0.82)))
+            crop_top = int(height * 0.39)
+            table_image = image.crop((0, crop_top, width, int(height * 0.77)))
             result, _elapsed = ocr(table_image)
             words = []
 
             for box, text, confidence in result or []:
-                if confidence < 0.35:
+                if confidence < 0.30:
                     continue
                 raw_text = norm_text(text)
                 if not raw_text:
@@ -1274,13 +1286,13 @@ def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, 
                     }
                 )
 
-            for line in group_pdf_lines(words, y_tolerance=8):
+            for line in group_pdf_lines(words, y_tolerance=5):
                 line_words = sorted(line["words"], key=lambda item: item["x"])
-                text_line = norm_text(" ".join(word["text"] for word in line_words))
+                text_line = normalize_maharaja_ocr_text(" ".join(word["text"] for word in line_words))
                 if not text_line or text_line.upper().startswith(("ORDER", "SUB", "TOTAL", "AMOUNT", "GOOD")):
                     continue
 
-                left_text = norm_text(" ".join(word["text"] for word in line_words if word["x"] < width * 0.60))
+                left_text = normalize_maharaja_ocr_text(" ".join(word["text"] for word in line_words if word["x"] < width * 0.60))
                 article = find_compact_article(left_text) or find_article_prefix(left_text, mapping)
                 if not article:
                     article = find_compact_article(text_line) or find_article_prefix(text_line, mapping)
@@ -1293,8 +1305,25 @@ def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, 
 
                 after_qty = text_line[qty_match.end() :]
                 numbers = amount_re.findall(after_qty)
-                if len(numbers) < 2:
+                if len(numbers) < 1:
                     continue
+                if "SUB TOTAL" in after_qty.upper() and len(numbers) >= 2:
+                    unit_price, amount = numbers[0], numbers[1]
+                elif len(numbers) >= 2:
+                    unit_price, amount = numbers[-2], numbers[-1]
+                else:
+                    quantity_number = parse_pdf_number(qty_match.group("quantity"))
+                    unit_price = ""
+                    number = parse_pdf_number(numbers[0])
+                    if isinstance(quantity_number, (int, float)) and quantity_number and isinstance(number, (int, float)):
+                        if number <= 20:
+                            unit_price = numbers[0]
+                            amount = round(float(quantity_number) * float(number), 2)
+                        else:
+                            amount = numbers[0]
+                            unit_price = f"{number / quantity_number:.2f}"
+                    else:
+                        amount = numbers[0]
 
                 article = canonical_article_key(article, mapping)
                 hs = mapping.get(article) or mapping.get(compact_key(article))
@@ -1314,8 +1343,8 @@ def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, 
                         "lookup_article": article,
                         "hs_code": hs,
                         "quantity": qty_match.group("quantity"),
-                        "unit_price": numbers[-2],
-                        "amount": numbers[-1],
+                        "unit_price": unit_price,
+                        "amount": amount,
                         "skip_value_fallback": True,
                         "raw_text": text_line,
                         "text": text_line,
