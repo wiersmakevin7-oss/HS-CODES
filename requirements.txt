@@ -1,10 +1,11 @@
-# Use Python 3.10 for this project.
-# rapidocr_onnxruntime 1.4.4 currently requires Python <3.13.
+# OCR uses rapidocr + onnxruntime for scanned PDF invoices.
+# On Streamlit Cloud, use Python 3.11 or newer.
 
 openpyxl>=3.1.2,<4
 pandas>=2.0,<3
 pdfplumber>=0.11,<1
 pypdf>=4.0,<7
 pypdfium2>=5.9,<6
-rapidocr_onnxruntime==1.4.4
+onnxruntime>=1.20,<2
+rapidocr>=3.9,<4
 streamlit>=1.30,<2

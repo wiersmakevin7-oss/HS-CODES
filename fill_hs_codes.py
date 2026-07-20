@@ -40,6 +40,32 @@ HS_HEADERS = {"hs code (artikellijst)", "hscode (artikellijst)", "hs-code (artik
 SIZE_HEADERS = {"size", "maat"}
 
 
+def create_rapidocr_engine():
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+    except ImportError:
+        from rapidocr import RapidOCR
+
+    return RapidOCR()
+
+
+def iter_rapidocr_results(ocr, image):
+    result = ocr(image)
+    if isinstance(result, tuple):
+        for item in result[0] or []:
+            yield item
+        return
+
+    boxes = getattr(result, "boxes", None)
+    texts = getattr(result, "txts", None)
+    scores = getattr(result, "scores", None)
+    if boxes is None or texts is None or scores is None:
+        return
+
+    for box, text, score in zip(boxes, texts, scores):
+        yield box, text, score
+
+
 def norm_text(value) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
@@ -1221,17 +1247,16 @@ def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, 
 
     try:
         import pypdfium2 as pdfium
-        from rapidocr_onnxruntime import RapidOCR
+        ocr = create_rapidocr_engine()
     except ImportError as exc:
         raise RuntimeError(
             "OCR is niet beschikbaar. Voor gescande PDF's zoals Maharaja moet Streamlit Cloud "
-            "met Python 3.10 of 3.11 draaien en moeten pypdfium2 + rapidocr_onnxruntime geïnstalleerd zijn."
+            "met Python 3.11 of nieuwer draaien en moeten pypdfium2 + rapidocr + onnxruntime geïnstalleerd zijn."
         ) from exc
 
     rows = []
     seen = set()
     document = pdfium.PdfDocument(str(input_pdf))
-    ocr = RapidOCR()
     amount_re = re.compile(r"\d[\d,]*(?:\.\d{2})")
     qty_re = re.compile(r"(?P<quantity>\d+)\s*(?:PCS|PRS)\b", flags=re.I)
     compact_articles = sorted(
@@ -1269,10 +1294,9 @@ def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, 
             width, height = image.size
             crop_top = int(height * 0.39)
             table_image = image.crop((0, crop_top, width, int(height * 0.77)))
-            result, _elapsed = ocr(table_image)
             words = []
 
-            for box, text, confidence in result or []:
+            for box, text, confidence in iter_rapidocr_results(ocr, table_image):
                 if confidence < 0.30:
                     continue
                 raw_text = norm_text(text)
@@ -2129,18 +2153,17 @@ def extract_pdf_articles_from_layout(
 def extract_pdf_articles_from_ocr(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
     try:
         import pypdfium2 as pdfium
-        from rapidocr_onnxruntime import RapidOCR
+        ocr = create_rapidocr_engine()
     except ImportError as exc:
         raise RuntimeError(
-            "OCR is niet beschikbaar. Voor gescande PDF's moet Streamlit Cloud met Python 3.10 of 3.11 draaien "
-            "en moeten pypdfium2 + rapidocr_onnxruntime geïnstalleerd zijn."
+            "OCR is niet beschikbaar. Voor gescande PDF's moet Streamlit Cloud met Python 3.11 of nieuwer draaien "
+            "en moeten pypdfium2 + rapidocr + onnxruntime geïnstalleerd zijn."
         ) from exc
 
     rows = []
     seen = set()
     text_reader = PdfReader(BytesIO(input_pdf.read_bytes()))
     document = pdfium.PdfDocument(str(input_pdf))
-    ocr = RapidOCR()
 
     try:
         for page_number in range(len(document)):
@@ -2163,9 +2186,7 @@ def extract_pdf_articles_from_ocr(input_pdf: Path, mapping: Dict[str, str]) -> L
                     min(height, int(height * 0.78)),
                 )
             )
-            result, _elapsed = ocr(table_image)
-
-            for box, text, confidence in result or []:
+            for box, text, confidence in iter_rapidocr_results(ocr, table_image):
                 if confidence < 0.75:
                     continue
 
