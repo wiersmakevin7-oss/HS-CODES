@@ -1253,9 +1253,9 @@ def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, 
 
     try:
         import pypdfium2 as pdfium
-        ocr = create_rapidocr_engine()
-  except ImportError as exc:
-    raise RuntimeError(
+         ocr = create_rapidocr_engine()
+    except ImportError as exc:
+        raise RuntimeError(
         f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
     ) from exc
 
