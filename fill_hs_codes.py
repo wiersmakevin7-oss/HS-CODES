@@ -2174,7 +2174,7 @@ def extract_pdf_articles_from_ocr(
     rows = []
     seen = set()
     text_reader = PdfReader(BytesIO(input_pdf.read_bytes()))
-    document = pdfium.PdfDocument(str(pdf_bytes))
+    document = pdfium.PdfDocument(str(input_pdf))
 
     try:
         for page_number in range(len(document)):
