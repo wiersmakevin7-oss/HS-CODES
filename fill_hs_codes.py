@@ -1246,6 +1246,213 @@ def canonical_article_key(article: str, mapping: Dict[str, str]) -> str:
         return min(spaced, key=len)
     return matches[0] if matches else article
 
+def extract_pdf_articles_from_mehra_shoes(
+    input_pdf: Path,
+    mapping: Dict[str, str],
+) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    rows: List[dict] = []
+    pending_rows: List[dict] = []
+    seen = set()
+
+    # Voorbeelden:
+    # 7237BR37 105367 Brown 37 10.0
+    # 7142ZW37 105367 Black 37 E.W - 20.0
+    # 7100ZW0 105367 Black 47 - 200.0 200.0 Pairs 0.15 30.00
+    article_re = re.compile(
+        r"\b(?P<article>\d{3,5}\s*[A-Z]{1,6}\s*\d{0,3})\b"
+        r".*?\b(?P<order>\d{6})\b"
+        r".*?"
+        r"(?:-\s*)?"
+        r"(?P<quantity>\d+(?:[,.]\d+)?)"
+        r"(?:\s+"
+        r"(?P<group_quantity>\d+(?:[,.]\d+)?)\s*"
+        r"(?:Pairs?|Prs|Pcs)\.?\s+"
+        r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
+        r"(?P<amount>\d[\d,]*(?:\.\d{2})?)"
+        r")?\s*$",
+        flags=re.I,
+    )
+
+    # Soms staat het groepstotaal als los herkend gedeelte aan het einde.
+    total_re = re.compile(
+        r"(?P<group_quantity>\d+(?:[,.]\d+)?)\s*"
+        r"(?:Pairs?|Prs|Pcs)\.?\s+"
+        r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
+        r"(?P<amount>\d[\d,]*(?:\.\d{2})?)\s*$",
+        flags=re.I,
+    )
+
+    def lookup_mehra_article(raw_article: str) -> Tuple[str, Optional[str]]:
+        normalized = norm_key(raw_article)
+        compact = compact_key(normalized)
+
+        candidates = [
+            normalized,
+            compact,
+        ]
+
+        # Mehra gebruikt bijvoorbeeld 7237BR37 terwijl de mapping eventueel
+        # als "7237 BR 37" is opgeslagen.
+        spaced_match = re.fullmatch(
+            r"(?P<number>\d{3,5})(?P<letters>[A-Z]{1,6})(?P<size>\d{0,3})",
+            compact,
+        )
+        if spaced_match:
+            number = spaced_match.group("number")
+            letters = spaced_match.group("letters")
+            size = spaced_match.group("size")
+
+            candidates.extend(
+                [
+                    norm_key(f"{number} {letters} {size}") if size else norm_key(f"{number} {letters}"),
+                    norm_key(f"{number}{letters}{size}"),
+                    norm_key(f"{number} {letters}"),
+                ]
+            )
+
+        for candidate in candidates:
+            hs = mapping.get(candidate) or mapping.get(compact_key(candidate))
+            if hs:
+                article = canonical_article_key(candidate, mapping)
+                return article, hs
+
+        return normalized, None
+
+    def flush_pending(unit_price_text: str) -> None:
+        nonlocal pending_rows
+
+        unit_price_number = parse_pdf_number(unit_price_text)
+        if not isinstance(unit_price_number, (int, float)):
+            pending_rows = []
+            return
+
+        for pending in pending_rows:
+            quantity_number = parse_pdf_number(pending["quantity"])
+            if not isinstance(quantity_number, (int, float)):
+                continue
+
+            amount = round(float(quantity_number) * float(unit_price_number), 2)
+
+            pending["unit_price"] = f"{float(unit_price_number):.2f}"
+            pending["amount"] = f"{amount:.2f}"
+            rows.append(pending)
+
+        pending_rows = []
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(
+            page.extract_text(layout=True) or page.extract_text() or ""
+            for page in pdf.pages
+        )
+
+        if not re.search(r"\bMEHRA\s+SHOES\b", full_text, flags=re.I):
+            return []
+
+        if not re.search(
+            r"Our\s+Product\s+Code\s+Party'?s\s+Code\s+Order\s+No",
+            full_text,
+            flags=re.I,
+        ):
+            return []
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            words = page.extract_words(
+                x_tolerance=2,
+                y_tolerance=3,
+                keep_blank_chars=False,
+            )
+
+            lines = group_pdf_lines(
+                [
+                    {
+                        "text": word["text"],
+                        "x": float(word["x0"]),
+                        "source_x": float(word["x0"]),
+                        "y": -float(word["top"]),
+                    }
+                    for word in words
+                ],
+                y_tolerance=3,
+            )
+
+            for line in lines:
+                line_words = sorted(line["words"], key=lambda item: item["x"])
+                text_line = norm_text(
+                    " ".join(word["text"] for word in line_words)
+                )
+
+                if not text_line:
+                    continue
+
+                upper_line = text_line.upper()
+                if upper_line.startswith(
+                    (
+                        "EXPORT INVOICE",
+                        "OUR PRODUCT CODE",
+                        "SUB TOTAL",
+                        "GRAND TOT",
+                        "TOTAL FOB",
+                        "DECLARATION",
+                        "SIGNATURE",
+                    )
+                ):
+                    continue
+
+                article_match = article_re.search(text_line)
+                if not article_match:
+                    continue
+
+                raw_article = article_match.group("article")
+                article, hs = lookup_mehra_article(raw_article)
+                if not hs:
+                    continue
+
+                quantity = article_match.group("quantity")
+                key = (
+                    page_number,
+                    int(-line["y"]),
+                    compact_key(article),
+                    quantity,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                pending_rows.append(
+                    {
+                        "page": page_number,
+                        "line": int(-line["y"]),
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                        "quantity": quantity,
+                        "unit_price": "",
+                        "amount": "",
+                        "skip_value_fallback": True,
+                        "raw_text": text_line,
+                        "text": text_line,
+                    }
+                )
+
+                unit_price = article_match.group("unit_price")
+
+                if not unit_price:
+                    total_match = total_re.search(text_line)
+                    if total_match:
+                        unit_price = total_match.group("unit_price")
+
+                # De prijs aan het einde van de regel geldt voor alle
+                # voorgaande maten binnen dezelfde productgroep.
+                if unit_price:
+                    flush_pending(unit_price)
+
+    # Onvolledige regels zonder groepsprijs niet aan het resultaat toevoegen.
+    return rows
 
 def extract_pdf_articles_from_maharaja_scan(
     input_pdf: Path,
