@@ -1247,17 +1247,21 @@ def canonical_article_key(article: str, mapping: Dict[str, str]) -> str:
     return matches[0] if matches else article
 
 
-def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+def extract_pdf_articles_from_maharaja_scan(
+    input_pdf: Path,
+    reader: PdfReader,
+    mapping: Dict[str, str],
+) -> List[dict]:
     if any(norm_text(get_pdf_page_text(page)) for page in reader.pages):
         return []
 
-try:
-    import pypdfium2 as pdfium
-    ocr = create_rapidocr_engine()
-except ImportError as exc:
-    raise RuntimeError(
-        f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
-    ) from exc
+    try:
+        import pypdfium2 as pdfium
+        ocr = create_rapidocr_engine()
+    except ImportError as exc:
+        raise RuntimeError(
+            f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
+        ) from exc
 
     rows = []
     seen = set()
@@ -2155,19 +2159,20 @@ def extract_pdf_articles_from_layout(
     return rows
 
 
-def extract_pdf_articles_from_ocr(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
-try:
-    import pypdfium2 as pdfium
-    ocr = create_rapidocr_engine()
-except ImportError as exc:
-    raise RuntimeError(
-        f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
-    ) from exc
+def extract_pdf_articles_from_ocr(pdf_bytes: bytes):
+    try:
+        import pypdfium2 as pdfium
+        ocr = create_rapidocr_engine()
+    except ImportError as exc:
+        raise RuntimeError(
+            f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
+        ) from exc
+
 
     rows = []
     seen = set()
     text_reader = PdfReader(BytesIO(input_pdf.read_bytes()))
-    document = pdfium.PdfDocument(str(input_pdf))
+    document = pdfium.PdfDocument(str(pdf_bytes))
 
     try:
         for page_number in range(len(document)):
