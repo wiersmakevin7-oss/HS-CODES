@@ -8,4 +8,5 @@ pypdf>=4.0,<7
 pypdfium2>=5.9,<6
 onnxruntime>=1.20,<2
 rapidocr>=3.9,<4
+opencv-python-headless>=4.10,<5
 streamlit>=1.30,<2
