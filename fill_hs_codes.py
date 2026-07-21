@@ -2450,6 +2450,9 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     mapping, names = load_catalog(mapping_csv)
     patterns = [(article, article_pattern(article)) for article in sorted(mapping, key=len, reverse=True)]
     reader = PdfReader(BytesIO(input_pdf.read_bytes()))
+    rows = extract_pdf_articles_from_mehra_shoes(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_leather_art_variants(input_pdf, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
