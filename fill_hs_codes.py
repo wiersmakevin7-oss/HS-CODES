@@ -2156,7 +2156,7 @@ def extract_pdf_articles_from_layout(
 
 
 def extract_pdf_articles_from_ocr(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
-   try:
+try:
     import pypdfium2 as pdfium
     ocr = create_rapidocr_engine()
 except ImportError as exc:
