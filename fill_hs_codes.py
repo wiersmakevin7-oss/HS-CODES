@@ -1254,11 +1254,10 @@ def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, 
     try:
         import pypdfium2 as pdfium
         ocr = create_rapidocr_engine()
-    except ImportError as exc:
-        raise RuntimeError(
-            "OCR is niet beschikbaar. Voor gescande PDF's zoals Maharaja moet Streamlit Cloud "
-            "met Python 3.11 of nieuwer draaien en moeten pypdfium2 + rapidocr + onnxruntime geïnstalleerd zijn."
-        ) from exc
+  except ImportError as exc:
+    raise RuntimeError(
+        f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
+    ) from exc
 
     rows = []
     seen = set()
