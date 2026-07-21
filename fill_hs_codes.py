@@ -1265,13 +1265,13 @@ def extract_pdf_articles_from_mehra_shoes(
     # 7100ZW0 105367 Black 47 - 200.0 200.0 Pairs 0.15 30.00
     article_re = re.compile(
         r"\b(?P<article>\d{3,5}\s*[A-Z]{1,6}\s*\d{0,3})\b"
-        r".*?\b(?P<order>\d{6})\b"
         r".*?"
+        r"(?:\b(?P<order>\d{6})\b.*?)?"
         r"(?:-\s*)?"
         r"(?P<quantity>\d+(?:[,.]\d+)?)"
         r"(?:\s+"
         r"(?P<group_quantity>\d+(?:[,.]\d+)?)\s*"
-        r"(?:Pairs?|Prs|Pcs)\.?\s+"
+        r"(?:Pairs?|Pair|Prs|Pcs)\.?\s+"
         r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
         r"(?P<amount>\d[\d,]*(?:\.\d{2})?)"
         r")?\s*$",
@@ -1412,7 +1412,14 @@ def extract_pdf_articles_from_mehra_shoes(
                 if not hs:
                     continue
 
-                quantity = article_match.group("quantity")
+                quantity_number = parse_pdf_number(article_match.group("quantity"))
+                if not isinstance(quantity_number, (int, float)) or quantity_number <= 0:
+                    continue
+
+                # use the parsed numeric quantity (quantity_number) instead of the
+                # raw regex group so downstream logic receives a numeric value
+                # (int/float) rather than a string.
+                quantity = quantity_number
                 key = (
                     page_number,
                     int(-line["y"]),
