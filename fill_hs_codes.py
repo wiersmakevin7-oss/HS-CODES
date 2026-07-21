@@ -2160,10 +2160,9 @@ def extract_pdf_articles_from_ocr(input_pdf: Path, mapping: Dict[str, str]) -> L
         import pypdfium2 as pdfium
         ocr = create_rapidocr_engine()
     except ImportError as exc:
-        raise RuntimeError(
-            "OCR is niet beschikbaar. Voor gescande PDF's moet Streamlit Cloud met Python 3.11 of nieuwer draaien "
-            "en moeten pypdfium2 + rapidocr + onnxruntime geïnstalleerd zijn."
-        ) from exc
+    raise RuntimeError(
+        f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
+    ) from exc
 
     rows = []
     seen = set()
