@@ -2156,10 +2156,10 @@ def extract_pdf_articles_from_layout(
 
 
 def extract_pdf_articles_from_ocr(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
-    try:
-        import pypdfium2 as pdfium
-        ocr = create_rapidocr_engine()
-    except ImportError as exc:
+   try:
+    import pypdfium2 as pdfium
+    ocr = create_rapidocr_engine()
+except ImportError as exc:
     raise RuntimeError(
         f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
     ) from exc
