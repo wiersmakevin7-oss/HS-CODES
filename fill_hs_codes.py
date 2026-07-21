@@ -2159,7 +2159,10 @@ def extract_pdf_articles_from_layout(
     return rows
 
 
-def extract_pdf_articles_from_ocr(pdf_bytes: bytes):
+def extract_pdf_articles_from_ocr(
+    input_pdf: Path,
+    mapping: Dict[str, str],
+) -> List[dict]:
     try:
         import pypdfium2 as pdfium
         ocr = create_rapidocr_engine()
@@ -2167,7 +2170,6 @@ def extract_pdf_articles_from_ocr(pdf_bytes: bytes):
         raise RuntimeError(
             f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
         ) from exc
-
 
     rows = []
     seen = set()
