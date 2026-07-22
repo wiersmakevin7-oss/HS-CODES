@@ -3237,6 +3237,7 @@ def fill_pdf_invoice(input_pdf: Path, output_xlsx: Path, mapping_csv: Path) -> d
             ws.cell(excel_row, 6).number_format = "#,##0.00"
             ws.cell(excel_row, 7).number_format = "#,##0.00"
 
+    invoice_total = None
     if rows:
         total_row = ws.max_row + 1
         invoice_total = sum(
@@ -3262,7 +3263,7 @@ def fill_pdf_invoice(input_pdf: Path, output_xlsx: Path, mapping_csv: Path) -> d
     ws.column_dimensions["G"].width = 16
     ws.column_dimensions["H"].width = 100
     wb.save(output_xlsx)
-    return {"filled": len(rows), "unmatched": [], "unmatched_count": 0}
+    return {"filled": len(rows), "unmatched": [], "unmatched_count": 0, "invoice_total": invoice_total}
 
 
 if __name__ == "__main__":
