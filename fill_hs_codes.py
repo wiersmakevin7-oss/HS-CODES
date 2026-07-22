@@ -1307,6 +1307,115 @@ def extract_pdf_articles_from_zhongshan_biaoqi(reader: PdfReader, mapping: Dict[
     return rows
 
 
+def extract_pdf_articles_from_changzhou_biseen(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    if not re.search(r"CHANGZHOU\s+BISEEN\s+HARNESS\s+EQUIPMENT", full_text, flags=re.I):
+        return []
+    if not re.search(r"style\s+no", full_text, flags=re.I) or not re.search(r"qty", full_text, flags=re.I):
+        return []
+
+    money = r"\$?\d[\d.,]*"
+    base_re = re.compile(r"^(?P<base>\d{3,5}\s+[A-Z]{2,6})\s*$", flags=re.I)
+    variant_re = re.compile(r"^(?P<variant>[A-Z0-9]{1,5})\s*$", flags=re.I)
+    inline_article_re = re.compile(
+        r"^(?P<article>\d{3,5}\s+[A-Z]{2,6}\s+[A-Z0-9]+)\b\s*(?P<rest>.*)$",
+        flags=re.I,
+    )
+    value_re = re.compile(
+        rf"^(?P<desc>.+?)\s+(?P<quantity>\d+)\s+"
+        rf"(?P<unit_price>{money})\s+(?P<amount>{money})\s*$",
+        flags=re.I,
+    )
+
+    rows = []
+    pending_base = ""
+    current_article = ""
+    current_start = {"page": 0, "line": 0}
+    desc_lines: List[str] = []
+
+    def add_row(page_number: int, line_number: int, article_text: str, value_match, raw_text: str) -> None:
+        article = norm_key(article_text)
+        hs = mapping.get(article) or mapping.get(compact_key(article))
+        if not hs:
+            return
+        rows.append(
+            {
+                "page": current_start.get("page") or page_number,
+                "line": current_start.get("line") or line_number,
+                "article": article,
+                "lookup_article": article,
+                "hs_code": hs,
+                "quantity": value_match.group("quantity"),
+                "unit_price": value_match.group("unit_price").replace("$", ""),
+                "amount": value_match.group("amount").replace("$", ""),
+                "skip_value_fallback": True,
+                "raw_text": raw_text,
+                "text": raw_text,
+            }
+        )
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            text_line = norm_text(line).strip()
+            if not text_line:
+                continue
+            if re.match(r"^total\b", text_line, flags=re.I):
+                current_article = ""
+                pending_base = ""
+                desc_lines = []
+                continue
+
+            base_match = base_re.match(text_line)
+            if base_match:
+                pending_base = base_match.group("base")
+                current_article = ""
+                desc_lines = []
+                current_start = {"page": page_number, "line": line_number}
+                continue
+
+            if pending_base:
+                variant_match = variant_re.match(text_line)
+                if variant_match:
+                    current_article = f"{pending_base} {variant_match.group('variant')}"
+                    pending_base = ""
+                    desc_lines = []
+                    continue
+
+            inline_match = inline_article_re.match(text_line)
+            if inline_match:
+                current_article = inline_match.group("article")
+                current_start = {"page": page_number, "line": line_number}
+                rest = inline_match.group("rest").strip()
+                desc_lines = []
+                if rest:
+                    value_match = value_re.match(rest)
+                    if value_match:
+                        add_row(page_number, line_number, current_article, value_match, text_line)
+                        current_article = ""
+                    else:
+                        desc_lines.append(rest)
+                continue
+
+            if not current_article:
+                continue
+
+            combined_text = " ".join(desc_lines + [text_line]).strip()
+            value_match = value_re.match(combined_text)
+            if value_match:
+                raw_text = f"{current_article} {combined_text}"
+                add_row(page_number, line_number, current_article, value_match, raw_text)
+                current_article = ""
+                desc_lines = []
+            else:
+                desc_lines.append(text_line)
+
+    return rows
+
+
 def extract_pdf_articles_from_changzhou_ziyuan_rows(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
     full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
     if not re.search(r"CHANGZHOU\s+ZIYUAN\s+SPORTS", full_text, flags=re.I):
@@ -2691,6 +2800,9 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_zhongshan_biaoqi(reader, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_changzhou_biseen(reader, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_changzhou_ziyuan_rows(reader, mapping)
