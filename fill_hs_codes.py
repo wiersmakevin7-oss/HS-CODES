@@ -1284,9 +1284,6 @@ def extract_pdf_articles_from_mehra_shoes(
     input_pdf: Path,
     mapping: Dict[str, str],
 ) -> List[dict]:
-    
-    print(">>> MEHRA PARSER GESTART <<<")
-
     try:
         import pdfplumber
     except ImportError:
@@ -1518,7 +1515,7 @@ def extract_pdf_articles_from_maharaja_scan(
     seen = set()
     document = pdfium.PdfDocument(str(input_pdf))
     amount_re = re.compile(r"\d[\d,]*(?:\.\d{2})")
-    qty_re = re.compile(r"(?P<quantity>\d+)\s*(?:PCS|PRS)\b", flags=re.I)
+    qty_re = re.compile(r"(?P<quantity>\d+)\s*(?:PCS|PRS|SET)\b", flags=re.I)
     compact_articles = sorted(
         [(article, compact_key(article)) for article in mapping],
         key=lambda item: len(item[1]),
@@ -1528,7 +1525,12 @@ def extract_pdf_articles_from_maharaja_scan(
     def normalize_maharaja_ocr_text(value: str) -> str:
         text = norm_text(value).replace("'", "")
         text = re.sub(r"\b[Ss](\d{3})\b", r"5\1", text)
+        text = re.sub(r"\b31[Oo0][Oo0]\b", "3100", text)
+        text = re.sub(r"\b(\d{3,5})\s+B0\b", r"\1 BO", text, flags=re.I)
         text = re.sub(r"\b(\d{3,5})\s+[2Zz][Ww]\b", r"\1 ZW", text)
+        text = re.sub(r"\b(\d{3,5})\s+ZW\s+ZW\b", r"\1 ZWZW", text, flags=re.I)
+        text = re.sub(r"\b(\d{3,5})\s+2W\s+ZW\b", r"\1 ZWZW", text, flags=re.I)
+        text = re.sub(r"\b(\d{3,5})\s+ZW\s+2W\b", r"\1 ZWZW", text, flags=re.I)
         text = re.sub(r"\b([2Zz][Ww])\s+([A-Z0-9])", r"ZW \2", text)
         text = re.sub(r"\b(\d{3,5}\s+[A-Z]{1,6})\s+O\b", r"\1 0", text, flags=re.I)
         return norm_text(text)
@@ -1544,99 +1546,124 @@ def extract_pdf_articles_from_maharaja_scan(
 
     try:
         for page_number in range(len(document)):
-            page = document[page_number]
-            try:
-                image = page.render(scale=0.9).to_pil()
-            finally:
-                if hasattr(page, "close"):
-                    page.close()
+            render_scales = (1.1, 0.9) if page_number == 1 else (1.1,)
+            for render_scale in render_scales:
+                page = document[page_number]
+                try:
+                    image = page.render(scale=render_scale).to_pil()
+                finally:
+                    if hasattr(page, "close"):
+                        page.close()
 
-            width, height = image.size
-            crop_top = int(height * 0.39)
-            table_image = image.crop((0, crop_top, width, int(height * 0.77)))
-            words = []
+                width, height = image.size
+                crop_top = int(height * 0.39)
+                table_image = image.crop((0, crop_top, width, int(height * 0.77)))
+                words = []
 
-            for box, text, confidence in iter_rapidocr_results(ocr, table_image):
-                if confidence < 0.30:
-                    continue
-                raw_text = norm_text(text)
-                if not raw_text:
-                    continue
-                xs = [point[0] for point in box]
-                ys = [point[1] + crop_top for point in box]
-                words.append(
-                    {
-                        "text": raw_text,
-                        "x": min(xs),
-                        "source_x": min(xs),
-                        "y": -min(ys),
-                    }
-                )
+                for box, text, confidence in iter_rapidocr_results(ocr, table_image):
+                    if confidence < 0.30:
+                        continue
+                    raw_text = norm_text(text)
+                    if not raw_text:
+                        continue
+                    xs = [point[0] for point in box]
+                    ys = [point[1] + crop_top for point in box]
+                    words.append(
+                        {
+                            "text": raw_text,
+                            "x": min(xs),
+                            "source_x": min(xs),
+                            "y": -min(ys),
+                        }
+                    )
 
-            for line in group_pdf_lines(words, y_tolerance=5):
-                line_words = sorted(line["words"], key=lambda item: item["x"])
-                text_line = normalize_maharaja_ocr_text(" ".join(word["text"] for word in line_words))
-                if not text_line or text_line.upper().startswith(("ORDER", "SUB", "TOTAL", "AMOUNT", "GOOD")):
-                    continue
+                for line in group_pdf_lines(words, y_tolerance=6):
+                    line_words = sorted(line["words"], key=lambda item: item["x"])
+                    text_line = normalize_maharaja_ocr_text(" ".join(word["text"] for word in line_words))
+                    if not text_line or text_line.upper().startswith(("ORDER", "SUB", "TOTAL", "AMOUNT", "GOOD")):
+                        continue
 
-                left_text = normalize_maharaja_ocr_text(" ".join(word["text"] for word in line_words if word["x"] < width * 0.60))
-                article = find_compact_article(left_text) or find_article_prefix(left_text, mapping)
-                if not article:
-                    article = find_compact_article(text_line) or find_article_prefix(text_line, mapping)
-                if not article:
-                    continue
+                    left_text = normalize_maharaja_ocr_text(" ".join(word["text"] for word in line_words if word["x"] < width * 0.60))
+                    article = find_compact_article(left_text) or find_article_prefix(left_text, mapping)
+                    if not article:
+                        article = find_compact_article(text_line) or find_article_prefix(text_line, mapping)
+                    if not article:
+                        continue
 
-                qty_match = qty_re.search(text_line)
-                if not qty_match:
-                    continue
+                    qty_match = qty_re.search(text_line)
+                    if qty_match:
+                        quantity = qty_match.group("quantity")
+                        after_qty = text_line[qty_match.end() :]
+                    else:
+                        quantity = ""
+                        after_qty = text_line
 
-                after_qty = text_line[qty_match.end() :]
-                numbers = amount_re.findall(after_qty)
-                if len(numbers) < 1:
-                    continue
-                if "SUB TOTAL" in after_qty.upper() and len(numbers) >= 2:
-                    unit_price, amount = numbers[0], numbers[1]
-                elif len(numbers) >= 2:
-                    unit_price, amount = numbers[-2], numbers[-1]
-                else:
-                    quantity_number = parse_pdf_number(qty_match.group("quantity"))
-                    unit_price = ""
-                    number = parse_pdf_number(numbers[0])
-                    if isinstance(quantity_number, (int, float)) and quantity_number and isinstance(number, (int, float)):
-                        if number <= 20:
-                            unit_price = numbers[0]
-                            amount = round(float(quantity_number) * float(number), 2)
+                    numbers = amount_re.findall(after_qty)
+                    if len(numbers) < 1:
+                        continue
+                    if "SUB TOTAL" in after_qty.upper() and len(numbers) >= 2:
+                        unit_price, amount = numbers[0], numbers[1]
+                    elif len(numbers) >= 2:
+                        unit_price, amount = numbers[-2], numbers[-1]
+                    else:
+                        quantity_number = parse_pdf_number(quantity)
+                        unit_price = ""
+                        number = parse_pdf_number(numbers[0])
+                        if isinstance(quantity_number, (int, float)) and quantity_number and isinstance(number, (int, float)):
+                            if number <= 20:
+                                unit_price = numbers[0]
+                                amount = round(float(quantity_number) * float(number), 2)
+                            else:
+                                amount = numbers[0]
+                                unit_price = f"{number / quantity_number:.2f}"
                         else:
                             amount = numbers[0]
-                            unit_price = f"{number / quantity_number:.2f}"
-                    else:
-                        amount = numbers[0]
 
-                article = canonical_article_key(article, mapping)
-                hs = mapping.get(article) or mapping.get(compact_key(article))
-                if not hs:
-                    continue
+                    if not quantity:
+                        unit_price_number = parse_pdf_number(unit_price)
+                        amount_number = parse_pdf_number(amount)
+                        if (
+                            isinstance(unit_price_number, (int, float))
+                            and unit_price_number
+                            and isinstance(amount_number, (int, float))
+                        ):
+                            derived_quantity = amount_number / unit_price_number
+                            if abs(derived_quantity - round(derived_quantity)) < 0.01:
+                                quantity = str(int(round(derived_quantity)))
+                    if not quantity:
+                        continue
 
-                key = (page_number + 1, round(-line["y"] / 8), article, qty_match.group("quantity"))
-                if key in seen:
-                    continue
-                seen.add(key)
+                    article = canonical_article_key(article, mapping)
+                    hs = mapping.get(article) or mapping.get(compact_key(article))
+                    if not hs:
+                        continue
 
-                rows.append(
-                    {
-                        "page": page_number + 1,
-                        "line": int(-line["y"]),
-                        "article": article,
-                        "lookup_article": article,
-                        "hs_code": hs,
-                        "quantity": qty_match.group("quantity"),
-                        "unit_price": unit_price,
-                        "amount": amount,
-                        "skip_value_fallback": True,
-                        "raw_text": text_line,
-                        "text": text_line,
-                    }
-                )
+                    key = (
+                        page_number + 1,
+                        article,
+                        quantity,
+                        str(parse_pdf_number(unit_price)),
+                        str(parse_pdf_number(amount)),
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    rows.append(
+                        {
+                            "page": page_number + 1,
+                            "line": int(-line["y"]),
+                            "article": article,
+                            "lookup_article": article,
+                            "hs_code": hs,
+                            "quantity": quantity,
+                            "unit_price": unit_price,
+                            "amount": amount,
+                            "skip_value_fallback": True,
+                            "raw_text": text_line,
+                            "text": text_line,
+                        }
+                    )
     finally:
         document.close()
 
@@ -2495,10 +2522,7 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     patterns = [(article, article_pattern(article)) for article in sorted(mapping, key=len, reverse=True)]
     reader = PdfReader(BytesIO(input_pdf.read_bytes()))
 
-    print(">>> VOOR MEHRA PARSER <<<")
     rows = extract_pdf_articles_from_mehra_shoes(input_pdf, mapping)
-    print(">>> MEHRA RIJEN:", len(rows), "<<<")
-
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_leather_art_variants(input_pdf, mapping)
