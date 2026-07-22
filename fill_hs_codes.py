@@ -1307,6 +1307,104 @@ def extract_pdf_articles_from_zhongshan_biaoqi(reader: PdfReader, mapping: Dict[
     return rows
 
 
+def extract_pdf_articles_from_haining_joy(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    if not re.search(r"Haining\s+Joy\s+Trading", full_text, flags=re.I):
+        return []
+    if not re.search(r"PACKS\s+UNIT\s+VALUE\s+AMOUNT", full_text, flags=re.I):
+        return []
+    invoice_total_override = None
+    total_match = re.search(r"\bTOTAL\s*:\s*US\$\s*(?P<total>\d[\d,]*(?:\.\d{2})?)", full_text, flags=re.I)
+    if total_match:
+        invoice_total_override = parse_pdf_number(total_match.group("total"))
+
+    article_re = re.compile(
+        r"(?P<article>\b(?:\d{3,5}\s+[A-Z]{2,6}\s+(?:\d{1,3}(?:-\d{1,3})?|[A-Z0-9]+))\b)\s*$",
+        flags=re.I,
+    )
+    split_article_re = re.compile(r"(?P<article>\b\d{3,5})\s*$")
+    value_re = re.compile(
+        r"PO#\s*\d+\s+\d+\s+\w+\s+\w+\s+"
+        r"(?P<quantity>\d+)\s+"
+        r"(?P<unit_price>\d[\d.,]*)\s+USD\s+"
+        r"(?P<amount>\d[\d,]*(?:\.\d{2})?)",
+        flags=re.I,
+    )
+
+    rows = []
+    pending: Optional[dict] = None
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            text_line = norm_text(line).strip()
+            if not text_line:
+                continue
+            if re.match(r"^(MADE\s+IN|TOTAL|[\d,.]+\s+US\$|1\.5%)", text_line, flags=re.I):
+                pending = None
+                continue
+
+            article_match = article_re.search(text_line)
+            if article_match:
+                pending = {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article_match.group("article"),
+                    "parts": [text_line],
+                }
+                continue
+
+            split_match = split_article_re.search(text_line)
+            if split_match and "PO#" not in text_line:
+                pending = {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": split_match.group("article"),
+                    "parts": [text_line],
+                }
+                continue
+
+            if not pending:
+                continue
+
+            pending["parts"].append(text_line)
+            value_match = value_re.search(text_line)
+            if not value_match:
+                continue
+
+            before_po = re.split(r"\bPO#", text_line, flags=re.I)[0].strip()
+            article_text = norm_key(f"{pending['article']} {before_po}")
+            hs = mapping.get(article_text) or mapping.get(compact_key(article_text))
+            if not hs:
+                article_text = norm_key(pending["article"])
+                hs = mapping.get(article_text) or mapping.get(compact_key(article_text))
+            if hs:
+                raw_text = norm_text(" ".join(pending["parts"]))
+                rows.append(
+                    {
+                        "page": pending["page"],
+                        "line": pending["line"],
+                        "article": article_text,
+                        "lookup_article": article_text,
+                        "hs_code": hs,
+                        "quantity": value_match.group("quantity"),
+                        "unit_price": value_match.group("unit_price"),
+                        "amount": value_match.group("amount"),
+                        "skip_value_fallback": True,
+                        "raw_text": raw_text,
+                        "text": raw_text,
+                    }
+                )
+                if invoice_total_override is not None and rows:
+                    rows[0]["invoice_total_override"] = invoice_total_override
+            pending = None
+
+    return rows
+
+
 def extract_pdf_articles_from_changzhou_biseen(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
     full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
     if not re.search(r"CHANGZHOU\s+BISEEN\s+HARNESS\s+EQUIPMENT", full_text, flags=re.I):
@@ -3099,6 +3197,9 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     rows = extract_pdf_articles_from_zhongshan_biaoqi(reader, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_haining_joy(reader, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_changzhou_biseen(reader, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
@@ -3240,11 +3341,15 @@ def fill_pdf_invoice(input_pdf: Path, output_xlsx: Path, mapping_csv: Path) -> d
     invoice_total = None
     if rows:
         total_row = ws.max_row + 1
-        invoice_total = sum(
-            float(ws.cell(row_idx, 7).value or 0)
-            for row_idx in range(2, total_row)
-            if isinstance(ws.cell(row_idx, 7).value, (int, float))
-        )
+        invoice_total_override = next((row.get("invoice_total_override") for row in rows if row.get("invoice_total_override") is not None), None)
+        if isinstance(invoice_total_override, (int, float)):
+            invoice_total = invoice_total_override
+        else:
+            invoice_total = sum(
+                float(ws.cell(row_idx, 7).value or 0)
+                for row_idx in range(2, total_row)
+                if isinstance(ws.cell(row_idx, 7).value, (int, float))
+            )
         ws.cell(total_row, 6).value = "Factuur waarde"
         ws.cell(total_row, 7).value = invoice_total
         total_fill = PatternFill("solid", fgColor="D9EAD3")
