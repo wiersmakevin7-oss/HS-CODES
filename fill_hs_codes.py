@@ -1416,6 +1416,95 @@ def extract_pdf_articles_from_changzhou_biseen(reader: PdfReader, mapping: Dict[
     return rows
 
 
+def extract_pdf_articles_from_quanzhou_xingye(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    if not re.search(r"QUANZHOU\s+XINGYE\s+TRAVELLING\s+PRODUCTS", full_text, flags=re.I):
+        return []
+    if not re.search(r"ORDER\s+NUMBER\s+ART\.?NAME.*QUANTITY.*UNIT\s+PRICE.*AMOUNT", full_text, flags=re.I | re.S):
+        return []
+
+    start_re = re.compile(
+        r"^(?P<order>\d{6})\s+(?P<article>[A-Z]?\d{3,5}\s+[A-Z]{1,6}\s+[A-Z0-9]+)\b(?P<rest>.*)$",
+        flags=re.I,
+    )
+    value_re = re.compile(r"\b(?P<cartons>\d+)\s+(?P<quantity>\d+)\s+USD\s*(?P<unit_price>\d[\d.,]*)\s*$", flags=re.I)
+    amount_re = re.compile(r"^US\$\s*(?P<amount>\d[\d,]*(?:\.\d{2})?)\s*$", flags=re.I)
+
+    rows = []
+    pending: Optional[dict] = None
+
+    def flush_with_amount(amount: str) -> None:
+        nonlocal pending
+        if not pending:
+            return
+        article = norm_key(pending["article"])
+        hs = mapping.get(article) or mapping.get(compact_key(article))
+        if hs:
+            raw_text = norm_text(" ".join(pending.get("parts", [])))
+            rows.append(
+                {
+                    "page": pending["page"],
+                    "line": pending["line"],
+                    "article": article,
+                    "lookup_article": article,
+                    "hs_code": hs,
+                    "quantity": pending.get("quantity", ""),
+                    "unit_price": pending.get("unit_price", ""),
+                    "amount": amount,
+                    "skip_value_fallback": True,
+                    "raw_text": raw_text,
+                    "text": raw_text,
+                }
+            )
+        pending = None
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            text_line = norm_text(line).strip()
+            if not text_line:
+                continue
+            if re.match(r"^(TOTAL|20%|80%)\b", text_line, flags=re.I):
+                pending = None
+                continue
+
+            amount_match = amount_re.match(text_line)
+            if amount_match:
+                flush_with_amount(amount_match.group("amount"))
+                continue
+
+            start_match = start_re.match(text_line)
+            if start_match:
+                pending = {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": start_match.group("article"),
+                    "parts": [text_line],
+                    "quantity": "",
+                    "unit_price": "",
+                }
+                rest = start_match.group("rest").strip()
+                value_match = value_re.search(rest)
+                if value_match:
+                    pending["quantity"] = value_match.group("quantity")
+                    pending["unit_price"] = value_match.group("unit_price")
+                continue
+
+            if not pending:
+                continue
+
+            pending["parts"].append(text_line)
+            value_match = value_re.search(text_line)
+            if value_match:
+                pending["quantity"] = value_match.group("quantity")
+                pending["unit_price"] = value_match.group("unit_price")
+
+    return rows
+
+
 def extract_pdf_articles_from_changzhou_ziyuan_rows(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
     full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
     if not re.search(r"CHANGZHOU\s+ZIYUAN\s+SPORTS", full_text, flags=re.I):
@@ -2803,6 +2892,9 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_changzhou_biseen(reader, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_quanzhou_xingye(reader, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_changzhou_ziyuan_rows(reader, mapping)
