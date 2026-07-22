@@ -1778,6 +1778,7 @@ def extract_pdf_articles_from_panache_exports(input_pdf: Path, mapping: Dict[str
             r"(?P<quantity>\d+)\s+(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
             r"(?P<amount>\d[\d.]*[,.]\d{2})\s*$"
         )
+        current = None
 
         for page_number, page in enumerate(pdf.pages, start=1):
             text = page.extract_text(layout=True) or page.extract_text() or ""
@@ -1789,7 +1790,6 @@ def extract_pdf_articles_from_panache_exports(input_pdf: Path, mapping: Dict[str
                 [{"text": word["text"], "x": float(word["x0"]), "source_x": float(word["x0"]), "y": -float(word["top"])} for word in words],
                 y_tolerance=3,
             )
-            current = None
 
             for line in lines:
                 text_line = norm_text(" ".join(word["text"] for word in line["words"]))
@@ -1813,6 +1813,8 @@ def extract_pdf_articles_from_panache_exports(input_pdf: Path, mapping: Dict[str
                     continue
 
                 row = dict(current)
+                row["page"] = page_number
+                row["line"] = int(-line["y"])
                 row["quantity"] = amount_match.group("quantity")
                 row["unit_price"] = amount_match.group("unit_price")
                 row["amount"] = amount_match.group("amount")
