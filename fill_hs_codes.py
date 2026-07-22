@@ -815,7 +815,7 @@ def extract_pdf_articles_from_ibrahim_buyer_code(input_pdf: Path, mapping: Dict[
             flags=re.I,
         )
         total_re = re.compile(
-            r"(?P<total_quantity>\d+)\s*(?:Pcs|Pair|Prs)\s+"
+            r"(?P<total_quantity>\d+)\s*(?:Pcs|Pair|Prs|Set)\s+"
             r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
             r"(?P<amount>\d[\d,]*(?:\.\d{2})?)",
             flags=re.I,
@@ -832,6 +832,7 @@ def extract_pdf_articles_from_ibrahim_buyer_code(input_pdf: Path, mapping: Dict[
                 y_tolerance=3,
             )
 
+            page_rows = []
             for line in lines:
                 text_line = norm_text(" ".join(word["text"] for word in line["words"]))
                 article_match = buyer_code_re.search(text_line)
@@ -853,18 +854,30 @@ def extract_pdf_articles_from_ibrahim_buyer_code(input_pdf: Path, mapping: Dict[
                 row = {
                     "page": page_number,
                     "line": int(-line["y"]),
-                    "article": article,
+                    "article": canonical_article_key(article, mapping),
                     "lookup_article": article,
                     "hs_code": hs,
                     "quantity": numbers_before_total[-1],
+                    "unit_price": "",
+                    "amount": "",
                     "skip_value_fallback": True,
                     "raw_text": text_line,
                     "text": text_line,
                 }
+                page_rows.append(row)
+
                 if total_match:
-                    row["unit_price"] = total_match.group("unit_price")
-                    row["amount"] = total_match.group("amount")
-                rows.append(row)
+                    rate = parse_pdf_number(total_match.group("unit_price"))
+                    if isinstance(rate, (int, float)):
+                        for pending in reversed(page_rows):
+                            if pending.get("unit_price"):
+                                break
+                            quantity = parse_pdf_number(pending.get("quantity", ""))
+                            if isinstance(quantity, (int, float)):
+                                pending["unit_price"] = total_match.group("unit_price")
+                                pending["amount"] = round(float(quantity) * float(rate), 2)
+
+            rows.extend(page_rows)
 
     return rows
 
