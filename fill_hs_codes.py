@@ -36,16 +36,25 @@ ARTICLE_HEADERS = {
     "item no.",
     "qhp item no",
     "qhp item no.",
+    "our product code party's code",
+    "our product code partys code",
+    "party's code",
+    "partys code",
 }
 HS_HEADERS = {"hs code (artikellijst)", "hscode (artikellijst)", "hs-code (artikellijst)"}
 SIZE_HEADERS = {"size", "maat"}
 
 
 def create_rapidocr_engine():
+    rapidocr_error = None
     try:
-        from rapidocr_onnxruntime import RapidOCR
-    except ImportError:
         from rapidocr import RapidOCR
+    except Exception as exc:
+        rapidocr_error = exc
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except Exception as fallback_exc:
+            raise ImportError(f"rapidocr: {rapidocr_error}; rapidocr_onnxruntime: {fallback_exc}") from fallback_exc
 
     return RapidOCR()
 
@@ -281,6 +290,36 @@ def lookup_hs(mapping: Dict[str, str], article_value, size_value=None) -> Option
     return None
 
 
+def lookup_article_from_excel_cell(mapping: Dict[str, str], article_value, size_value=None) -> Tuple[Optional[str], Optional[str]]:
+    article = norm_key(article_value)
+    if not article:
+        return None, None
+
+    size = norm_size(size_value)
+    candidates = [article]
+    if size:
+        candidates.insert(0, norm_key(f"{article} {size}"))
+
+    for candidate in candidates:
+        direct = mapping.get(candidate) or mapping.get(compact_key(candidate))
+        if direct:
+            return candidate, direct
+
+    text_article = find_article_in_text(article, mapping, []) or find_article_prefix(article, mapping)
+    if text_article:
+        return text_article, mapping.get(text_article) or mapping.get(compact_key(text_article))
+
+    compact = compact_key(article)
+    for mapped_article in sorted(mapping, key=lambda item: len(compact_key(item)), reverse=True):
+        mapped_compact = compact_key(mapped_article)
+        if len(mapped_compact) < 4 or mapped_compact.isdigit():
+            continue
+        if mapped_compact in compact:
+            return mapped_article, mapping.get(mapped_article) or mapping.get(mapped_compact)
+
+    return None, None
+
+
 def is_invoice_detail_row(ws, row_idx: int, article_col: int, size_col: Optional[int]) -> bool:
     size_value = ws.cell(row_idx, size_col).value if size_col else None
     color_col = size_col - 1 if size_col and size_col > article_col + 1 else None
@@ -365,12 +404,12 @@ def fill_invoice(input_xlsx: Path, output_xlsx: Path, mapping_csv: Path) -> dict
                 continue
 
             size_value = ws.cell(r, size_col).value if size_col else None
-            hs = lookup_hs(mapping, lookup_article, size_value)
+            matched_article, hs = lookup_article_from_excel_cell(mapping, lookup_article, size_value)
             if hs:
                 ws.cell(r, hs_col).value = hs
                 total_filled += 1
-            else:
-                unmatched.append({"sheet": ws.title, "row": r, "article": lookup_article})
+            elif is_invoice_detail_row(ws, r, article_col, size_col):
+                unmatched.append({"sheet": ws.title, "row": r, "article": matched_article or lookup_article})
 
     wb.save(output_xlsx)
     return {"filled": total_filled, "unmatched": unmatched[:100], "unmatched_count": len(unmatched)}
@@ -1241,8 +1280,229 @@ def canonical_article_key(article: str, mapping: Dict[str, str]) -> str:
         return min(spaced, key=len)
     return matches[0] if matches else article
 
+def extract_pdf_articles_from_mehra_shoes(
+    input_pdf: Path,
+    mapping: Dict[str, str],
+) -> List[dict]:
+    
+    print(">>> MEHRA PARSER GESTART <<<")
 
-def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    rows: List[dict] = []
+    pending_rows: List[dict] = []
+    seen = set()
+
+    # Voorbeelden:
+    # 7237BR37 105367 Brown 37 10.0
+    # 7142ZW37 105367 Black 37 E.W - 20.0
+    # 7100ZW0 105367 Black 47 - 200.0 200.0 Pairs 0.15 30.00
+    article_re = re.compile(
+        r"\b(?P<article>\d{3,5}\s*[A-Z]{1,6}\s*\d{0,3})\b"
+        r".*?"
+        r"(?:\b(?P<order>\d{6})\b.*?)?"
+        r"(?:-\s*)?"
+        r"(?P<quantity>\d+(?:[,.]\d+)?)"
+        r"(?:\s+"
+        r"(?P<group_quantity>\d+(?:[,.]\d+)?)\s*"
+        r"(?:Pairs?|Pair|Prs|Pcs)\.?\s+"
+        r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
+        r"(?P<amount>\d[\d,]*(?:\.\d{2})?)"
+        r")?\s*$",
+        flags=re.I,
+    )
+
+    # Soms staat het groepstotaal als los herkend gedeelte aan het einde.
+    total_re = re.compile(
+        r"(?P<group_quantity>\d+(?:[,.]\d+)?)\s*"
+        r"(?:Pairs?|Prs|Pcs)\.?\s+"
+        r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
+        r"(?P<amount>\d[\d,]*(?:\.\d{2})?)\s*$",
+        flags=re.I,
+    )
+
+    def lookup_mehra_article(raw_article: str) -> Tuple[str, Optional[str]]:
+        normalized = norm_key(raw_article)
+        compact = compact_key(normalized)
+
+        candidates = [
+            normalized,
+            compact,
+        ]
+
+        # Mehra gebruikt bijvoorbeeld 7237BR37 terwijl de mapping eventueel
+        # als "7237 BR 37" is opgeslagen.
+        spaced_match = re.fullmatch(
+            r"(?P<number>\d{3,5})(?P<letters>[A-Z]{1,6})(?P<size>\d{0,3})",
+            compact,
+        )
+        if spaced_match:
+            number = spaced_match.group("number")
+            letters = spaced_match.group("letters")
+            size = spaced_match.group("size")
+
+            candidates.extend(
+                [
+                    norm_key(f"{number} {letters} {size}") if size else norm_key(f"{number} {letters}"),
+                    norm_key(f"{number}{letters}{size}"),
+                    norm_key(f"{number} {letters}"),
+                ]
+            )
+
+        for candidate in candidates:
+            hs = mapping.get(candidate) or mapping.get(compact_key(candidate))
+            if hs:
+                article = canonical_article_key(candidate, mapping)
+                return article, hs
+
+        return normalized, None
+
+    def flush_pending(unit_price_text: str) -> None:
+        nonlocal pending_rows
+
+        unit_price_number = parse_pdf_number(unit_price_text)
+        if not isinstance(unit_price_number, (int, float)):
+            pending_rows = []
+            return
+
+        for pending in pending_rows:
+            quantity_number = parse_pdf_number(pending["quantity"])
+            if not isinstance(quantity_number, (int, float)):
+                continue
+
+            amount = round(float(quantity_number) * float(unit_price_number), 2)
+
+            pending["unit_price"] = f"{float(unit_price_number):.2f}"
+            pending["amount"] = f"{amount:.2f}"
+            rows.append(pending)
+
+        pending_rows = []
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(
+            page.extract_text(layout=True) or page.extract_text() or ""
+            for page in pdf.pages
+        )
+
+        if not re.search(r"\bMEHRA\s+SHOES\b", full_text, flags=re.I):
+            return []
+
+        if not re.search(
+            r"Our\s+Product\s+Code\s+Party'?s\s+Code\s+Order\s+No",
+            full_text,
+            flags=re.I,
+        ):
+            return []
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            words = page.extract_words(
+                x_tolerance=2,
+                y_tolerance=3,
+                keep_blank_chars=False,
+            )
+
+            lines = group_pdf_lines(
+                [
+                    {
+                        "text": word["text"],
+                        "x": float(word["x0"]),
+                        "source_x": float(word["x0"]),
+                        "y": -float(word["top"]),
+                    }
+                    for word in words
+                ],
+                y_tolerance=3,
+            )
+
+            for line in lines:
+                line_words = sorted(line["words"], key=lambda item: item["x"])
+                text_line = norm_text(
+                    " ".join(word["text"] for word in line_words)
+                )
+
+                if not text_line:
+                    continue
+
+                upper_line = text_line.upper()
+                if upper_line.startswith(
+                    (
+                        "EXPORT INVOICE",
+                        "OUR PRODUCT CODE",
+                        "SUB TOTAL",
+                        "GRAND TOT",
+                        "TOTAL FOB",
+                        "DECLARATION",
+                        "SIGNATURE",
+                    )
+                ):
+                    continue
+
+                article_match = article_re.search(text_line)
+                if not article_match:
+                    continue
+
+                raw_article = article_match.group("article")
+                article, hs = lookup_mehra_article(raw_article)
+                if not hs:
+                    continue
+
+                quantity_number = parse_pdf_number(article_match.group("quantity"))
+                if not isinstance(quantity_number, (int, float)) or quantity_number <= 0:
+                    continue
+
+                # use the parsed numeric quantity (quantity_number) instead of the
+                # raw regex group so downstream logic receives a numeric value
+                # (int/float) rather than a string.
+                quantity = quantity_number
+                key = (
+                    page_number,
+                    int(-line["y"]),
+                    compact_key(article),
+                    quantity,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                pending_rows.append(
+                    {
+                        "page": page_number,
+                        "line": int(-line["y"]),
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                        "quantity": quantity,
+                        "unit_price": "",
+                        "amount": "",
+                        "skip_value_fallback": True,
+                        "raw_text": text_line,
+                        "text": text_line,
+                    }
+                )
+
+                unit_price = article_match.group("unit_price")
+
+                if not unit_price:
+                    total_match = total_re.search(text_line)
+                    if total_match:
+                        unit_price = total_match.group("unit_price")
+
+                # De prijs aan het einde van de regel geldt voor alle
+                # voorgaande maten binnen dezelfde productgroep.
+                if unit_price:
+                    flush_pending(unit_price)
+
+    # Onvolledige regels zonder groepsprijs niet aan het resultaat toevoegen.
+    return rows
+
+def extract_pdf_articles_from_maharaja_scan(
+    input_pdf: Path,
+    reader: PdfReader,
+    mapping: Dict[str, str],
+) -> List[dict]:
     if any(norm_text(get_pdf_page_text(page)) for page in reader.pages):
         return []
 
@@ -1251,8 +1511,7 @@ def extract_pdf_articles_from_maharaja_scan(input_pdf: Path, reader: PdfReader, 
         ocr = create_rapidocr_engine()
     except ImportError as exc:
         raise RuntimeError(
-            "OCR is niet beschikbaar. Voor gescande PDF's zoals Maharaja moet Streamlit Cloud "
-            "met Python 3.11 of nieuwer draaien en moeten pypdfium2 + rapidocr + onnxruntime geïnstalleerd zijn."
+            f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
         ) from exc
 
     rows = []
@@ -2151,14 +2410,16 @@ def extract_pdf_articles_from_layout(
     return rows
 
 
-def extract_pdf_articles_from_ocr(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+def extract_pdf_articles_from_ocr(
+    input_pdf: Path,
+    mapping: Dict[str, str],
+) -> List[dict]:
     try:
         import pypdfium2 as pdfium
         ocr = create_rapidocr_engine()
     except ImportError as exc:
         raise RuntimeError(
-            "OCR is niet beschikbaar. Voor gescande PDF's moet Streamlit Cloud met Python 3.11 of nieuwer draaien "
-            "en moeten pypdfium2 + rapidocr + onnxruntime geïnstalleerd zijn."
+            f"OCR kon niet worden gestart. Werkelijke fout: {exc}"
         ) from exc
 
     rows = []
@@ -2233,6 +2494,13 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     mapping, names = load_catalog(mapping_csv)
     patterns = [(article, article_pattern(article)) for article in sorted(mapping, key=len, reverse=True)]
     reader = PdfReader(BytesIO(input_pdf.read_bytes()))
+
+    print(">>> VOOR MEHRA PARSER <<<")
+    rows = extract_pdf_articles_from_mehra_shoes(input_pdf, mapping)
+    print(">>> MEHRA RIJEN:", len(rows), "<<<")
+
+    if rows:
+        return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_leather_art_variants(input_pdf, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
