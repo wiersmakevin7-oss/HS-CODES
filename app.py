@@ -56,7 +56,11 @@ if invoice:
     output_name = st.session_state.get("output_name")
 
     if result and output_bytes and output_name:
-        st.success(f"Klaar: {result['filled']} HS-codes ingevuld.")
+        message = f"Klaar: {result['filled']} HS-codes ingevuld."
+        invoice_total = result.get("invoice_total")
+        if isinstance(invoice_total, (int, float)):
+            message += f" Factuurwaarde: {invoice_total:,.2f}."
+        st.success(message)
         st.download_button(
             "Download nieuwe Excel met HS-codes",
             data=output_bytes,
