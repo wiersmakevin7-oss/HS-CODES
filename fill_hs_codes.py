@@ -28,6 +28,7 @@ ARTICLE_HEADERS = {
     "art no.",
     "artikelnummer",
     "article number",
+    "model",
     "buyer art no",
     "buyer art no.",
     "buyer article no",
