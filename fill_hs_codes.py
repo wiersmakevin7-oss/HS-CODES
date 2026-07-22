@@ -1233,6 +1233,69 @@ def extract_pdf_articles_from_gng_pet_rows(reader: PdfReader, mapping: Dict[str,
     return rows
 
 
+def extract_pdf_articles_from_zhongshan_biaoqi(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    if not re.search(r"ZHONGSHAN\s+BIAOQI\s+HOUSEWARE", full_text, flags=re.I):
+        return []
+    if not re.search(r"Item\s+No\.?\s+Production\s+Description", full_text, flags=re.I):
+        return []
+
+    value_re = re.compile(
+        r"^(?P<unit_price>\d[\d,]*(?:\.\d{2})?)\s+"
+        r"(?P<quantity>\d[\d,]*)\s+"
+        r"(?P<amount>\d[\d,]*(?:\.\d{2})?)\s+"
+        r"(?P<cartons>\d+)\s*$"
+    )
+    article_re = re.compile(r"^(?P<article>[A-Z]?\d{3,5}\s+[A-Z]{2,6}\s+[A-Z0-9]+)\b(?P<desc>.*)$", flags=re.I)
+
+    rows = []
+    values: List[dict] = []
+    articles: List[dict] = []
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            text_line = norm_text(line).strip()
+            value_match = value_re.match(text_line)
+            if value_match:
+                values.append(value_match.groupdict())
+                continue
+
+            article_match = article_re.match(text_line)
+            if not article_match:
+                continue
+
+            article = norm_key(article_match.group("article"))
+            hs = mapping.get(article) or mapping.get(compact_key(article))
+            if not hs:
+                continue
+
+            articles.append(
+                {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article,
+                    "lookup_article": article,
+                    "hs_code": hs,
+                    "raw_text": text_line,
+                    "text": text_line,
+                }
+            )
+
+    for article_row, value_row in zip(articles, values):
+        row = dict(article_row)
+        row["quantity"] = value_row["quantity"].replace(",", "")
+        row["unit_price"] = value_row["unit_price"]
+        row["amount"] = value_row["amount"]
+        row["skip_value_fallback"] = True
+        rows.append(row)
+
+    return rows
+
+
 def extract_pdf_articles_from_changzhou_ziyuan_rows(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
     full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
     if not re.search(r"CHANGZHOU\s+ZIYUAN\s+SPORTS", full_text, flags=re.I):
@@ -2614,6 +2677,9 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_gng_pet_rows(reader, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_zhongshan_biaoqi(reader, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_changzhou_ziyuan_rows(reader, mapping)
