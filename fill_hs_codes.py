@@ -36,6 +36,10 @@ ARTICLE_HEADERS = {
     "item no.",
     "qhp item no",
     "qhp item no.",
+    "our product code party's code",
+    "our product code partys code",
+    "party's code",
+    "partys code",
 }
 HS_HEADERS = {"hs code (artikellijst)", "hscode (artikellijst)", "hs-code (artikellijst)"}
 SIZE_HEADERS = {"size", "maat"}
@@ -286,6 +290,36 @@ def lookup_hs(mapping: Dict[str, str], article_value, size_value=None) -> Option
     return None
 
 
+def lookup_article_from_excel_cell(mapping: Dict[str, str], article_value, size_value=None) -> Tuple[Optional[str], Optional[str]]:
+    article = norm_key(article_value)
+    if not article:
+        return None, None
+
+    size = norm_size(size_value)
+    candidates = [article]
+    if size:
+        candidates.insert(0, norm_key(f"{article} {size}"))
+
+    for candidate in candidates:
+        direct = mapping.get(candidate) or mapping.get(compact_key(candidate))
+        if direct:
+            return candidate, direct
+
+    text_article = find_article_in_text(article, mapping, []) or find_article_prefix(article, mapping)
+    if text_article:
+        return text_article, mapping.get(text_article) or mapping.get(compact_key(text_article))
+
+    compact = compact_key(article)
+    for mapped_article in sorted(mapping, key=lambda item: len(compact_key(item)), reverse=True):
+        mapped_compact = compact_key(mapped_article)
+        if len(mapped_compact) < 4 or mapped_compact.isdigit():
+            continue
+        if mapped_compact in compact:
+            return mapped_article, mapping.get(mapped_article) or mapping.get(mapped_compact)
+
+    return None, None
+
+
 def is_invoice_detail_row(ws, row_idx: int, article_col: int, size_col: Optional[int]) -> bool:
     size_value = ws.cell(row_idx, size_col).value if size_col else None
     color_col = size_col - 1 if size_col and size_col > article_col + 1 else None
@@ -370,12 +404,12 @@ def fill_invoice(input_xlsx: Path, output_xlsx: Path, mapping_csv: Path) -> dict
                 continue
 
             size_value = ws.cell(r, size_col).value if size_col else None
-            hs = lookup_hs(mapping, lookup_article, size_value)
+            matched_article, hs = lookup_article_from_excel_cell(mapping, lookup_article, size_value)
             if hs:
                 ws.cell(r, hs_col).value = hs
                 total_filled += 1
-            else:
-                unmatched.append({"sheet": ws.title, "row": r, "article": lookup_article})
+            elif is_invoice_detail_row(ws, r, article_col, size_col):
+                unmatched.append({"sheet": ws.title, "row": r, "article": matched_article or lookup_article})
 
     wb.save(output_xlsx)
     return {"filled": total_filled, "unmatched": unmatched[:100], "unmatched_count": len(unmatched)}
