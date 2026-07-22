@@ -882,6 +882,75 @@ def extract_pdf_articles_from_ibrahim_buyer_code(input_pdf: Path, mapping: Dict[
     return rows
 
 
+def extract_pdf_articles_from_ruksh_rows(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    rows = []
+
+    with pdfplumber.open(str(input_pdf)) as pdf:
+        full_text = "\n".join(page.extract_text(layout=True) or page.extract_text() or "" for page in pdf.pages)
+        if not re.search(r"RUKSH\s+ENTERPRISES", full_text, flags=re.I):
+            return []
+        if not re.search(r"BUYER\s+ARTICLE.*STYLE\s+DESCRIPTION.*Rate.*Amount", full_text, flags=re.I | re.S):
+            return []
+
+        row_re = re.compile(
+            r"^(?P<order>\d{6})\s+"
+            r"(?P<article>\d{3,5}\s+[A-Z]{1,6})\s+"
+            r"(?P<invoice_hs>\d{6,10})\s+"
+            r".+?\s+"
+            r"(?P<color>[A-Z]+)\s+"
+            r"(?P<size>[A-Z0-9./-]+)\s+"
+            r"(?P<quantity>\d+(?:[,.]\d+)?)\s+"
+            r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
+            r"(?P<amount>\d[\d,]*(?:\.\d{2})?)$",
+            flags=re.I,
+        )
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text(layout=True) or page.extract_text() or ""
+            if is_packing_list_page(text):
+                continue
+
+            words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
+            lines = group_pdf_lines(
+                [{"text": word["text"], "x": float(word["x0"]), "source_x": float(word["x0"]), "y": -float(word["top"])} for word in words],
+                y_tolerance=3,
+            )
+
+            for line in lines:
+                text_line = norm_text(" ".join(word["text"] for word in line["words"]))
+                match = row_re.match(text_line)
+                if not match:
+                    continue
+
+                article = canonical_article_key(match.group("article"), mapping)
+                hs = mapping.get(article) or mapping.get(compact_key(article))
+                if not hs:
+                    continue
+
+                rows.append(
+                    {
+                        "page": page_number,
+                        "line": int(-line["y"]),
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": hs,
+                        "quantity": match.group("quantity"),
+                        "unit_price": match.group("unit_price"),
+                        "amount": match.group("amount"),
+                        "skip_value_fallback": True,
+                        "raw_text": text_line,
+                        "text": text_line,
+                    }
+                )
+
+    return rows
+
+
 def extract_pdf_articles_from_mark_equestrian_party_code(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
     try:
         import pdfplumber
@@ -2557,6 +2626,9 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_ibrahim_buyer_code(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_ruksh_rows(input_pdf, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_tarun_thermoware(input_pdf, mapping)
