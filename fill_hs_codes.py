@@ -1188,12 +1188,13 @@ def extract_pdf_articles_from_gng_pet_rows(reader: PdfReader, mapping: Dict[str,
         return []
 
     rows = []
+    money = r"\d[\d,]*(?:\.\d{2})|\d[\d.]*(?:,\d{2})"
     line_re = re.compile(
         r"^(?P<article>[A-Z]?\d{3,5}\s+[A-Z]{2,6}\s+[A-Z0-9]+)\s+.+?\s+"
         r"(?P<order>\d{6})\s+.+?\s+"
         r"(?P<quantity>\d+)\s+"
-        r"(?P<unit_price>\d+(?:[,.]\d+)?)\s+"
-        r"(?P<amount>\d[\d.]*,\d{2})",
+        rf"(?P<unit_price>{money})\s+"
+        rf"(?P<amount>{money})\s*€?\s*$",
         flags=re.I,
     )
 
