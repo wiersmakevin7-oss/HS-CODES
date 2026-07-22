@@ -1587,6 +1587,132 @@ def extract_pdf_articles_from_xiamen_grassland(reader: PdfReader, mapping: Dict[
     return rows
 
 
+def extract_pdf_articles_from_jone_shou_scan(input_pdf: Path, mapping: Dict[str, str]) -> List[dict]:
+    try:
+        import pypdfium2 as pdfium
+        ocr = create_rapidocr_engine()
+    except ImportError:
+        return []
+
+    compact_to_article: Dict[str, str] = {}
+    for article in mapping:
+        compact = compact_key(article)
+        if len(compact) < 6 or compact.isdigit() or not re.search(r"[A-Z]", compact):
+            continue
+        current = compact_to_article.get(compact)
+        if not current or (" " in article and " " not in current):
+            compact_to_article[compact] = article
+
+    def ocr_article(text: str) -> Optional[str]:
+        compact = compact_key(text)
+        if not compact:
+            return None
+        variants = [compact]
+        if re.search(r"\d+C[NX]$", compact):
+            variants.append(re.sub(r"C[NX]$", "CM", compact))
+        if "ZV" in compact:
+            variants.append(compact.replace("ZV", "ZW"))
+        for variant in variants:
+            article = compact_to_article.get(variant)
+            if article:
+                return article
+        for mapped_compact in sorted(compact_to_article, key=len, reverse=True):
+            if len(mapped_compact) >= 7 and mapped_compact in compact:
+                return compact_to_article[mapped_compact]
+        return None
+
+    def nearby_value(tokens: List[dict], article_y: float, left: float, right: float, pattern: str) -> Optional[dict]:
+        candidates = [
+            token
+            for token in tokens
+            if left <= token["x"] <= right
+            and abs(token["y"] - article_y) <= 24
+            and re.search(pattern, token["text"], flags=re.I)
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda token: abs(token["y"] - article_y))
+
+    rows = []
+    seen = set()
+    ocr_text_parts = []
+    document = pdfium.PdfDocument(str(input_pdf))
+
+    try:
+        for page_number in range(len(document)):
+            page = document[page_number]
+            try:
+                image = page.render(scale=2).to_pil()
+            finally:
+                if hasattr(page, "close"):
+                    page.close()
+
+            width, height = image.size
+            table_image = image.crop(
+                (
+                    max(0, int(width * 0.08)),
+                    int(height * 0.16),
+                    min(width, int(width * 0.96)),
+                    min(height, int(height * 0.94)),
+                )
+            )
+
+            tokens = []
+            for box, text, confidence in iter_rapidocr_results(ocr, table_image):
+                if confidence < 0.75:
+                    continue
+                xs = [point[0] for point in box]
+                ys = [point[1] for point in box]
+                token = {"x": min(xs), "y": min(ys), "text": norm_text(text)}
+                tokens.append(token)
+                ocr_text_parts.append(token["text"])
+
+            for token in tokens:
+                if not 130 <= token["x"] <= 260:
+                    continue
+                article = ocr_article(token["text"])
+                if not article:
+                    continue
+
+                qty_token = nearby_value(tokens, token["y"], 540, 670, r"\d+\s*(?:PCS|PAIRS?)\b")
+                unit_token = nearby_value(tokens, token["y"], 700, 840, r"(?:USD)?\d+[\d.,]*")
+                amount_token = nearby_value(tokens, token["y"], 880, 1020, r"(?:USD)?\d+[\d,]*(?:\.\d{2})?")
+                if not (qty_token and unit_token and amount_token):
+                    continue
+
+                quantity = re.sub(r"\D", "", qty_token["text"])
+                unit_price = re.sub(r"(?i)^USD", "", unit_token["text"]).strip()
+                amount = re.sub(r"(?i)^USD", "", amount_token["text"]).strip()
+                key = (page_number + 1, article, quantity, amount)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                raw_text = norm_text(f"{article} {qty_token['text']} {unit_token['text']} {amount_token['text']}")
+                rows.append(
+                    {
+                        "page": page_number + 1,
+                        "line": int(token["y"]),
+                        "article": article,
+                        "lookup_article": article,
+                        "hs_code": mapping[article] or mapping.get(compact_key(article), ""),
+                        "quantity": quantity,
+                        "unit_price": unit_price,
+                        "amount": amount,
+                        "skip_value_fallback": True,
+                        "raw_text": raw_text,
+                        "text": raw_text,
+                    }
+                )
+    finally:
+        document.close()
+
+    ocr_text = " ".join(ocr_text_parts)
+    if not re.search(r"(?:MADE\s*IN\s*TAIWAN|FOB\s*KAOHSIUNG|JS260616040)", ocr_text, flags=re.I):
+        return []
+    return rows if len(rows) >= 10 else []
+
+
 def extract_pdf_articles_from_changzhou_ziyuan_rows(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
     full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
     if not re.search(r"CHANGZHOU\s+ZIYUAN\s+SPORTS", full_text, flags=re.I):
@@ -2986,6 +3112,9 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_karan_letex_rows(input_pdf, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_jone_shou_scan(input_pdf, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_maharaja_scan(input_pdf, reader, mapping)
