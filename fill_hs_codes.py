@@ -37,6 +37,8 @@ ARTICLE_HEADERS = {
     "item no.",
     "qhp item no",
     "qhp item no.",
+    "stockcode item qhp",
+    "stockcode qhp",
     "our product code party's code",
     "our product code partys code",
     "party's code",
@@ -366,7 +368,15 @@ def fill_invoice(input_xlsx: Path, output_xlsx: Path, mapping_csv: Path) -> dict
     total_filled = 0
     unmatched = []
 
-    invoice_sheets = [ws for ws in wb.worksheets if ws.title.strip().lower() == "invoice"]
+    invoice_sheets = [
+        ws
+        for ws in wb.worksheets
+        if (
+            ws.title.strip().lower() in {"invoice", "ci", "commercial invoice", "commerical invoice"}
+            or "invoice" in ws.title.strip().lower()
+        )
+        and not re.search(r"\b(?:pl|packing)\b|packing\s*list", ws.title.strip(), flags=re.I)
+    ]
     worksheets = invoice_sheets or wb.worksheets
 
     for ws in worksheets:
