@@ -1505,6 +1505,88 @@ def extract_pdf_articles_from_quanzhou_xingye(reader: PdfReader, mapping: Dict[s
     return rows
 
 
+def extract_pdf_articles_from_xiamen_grassland(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
+    full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    if not re.search(r"XIAMEN\s+GRASSLAND\s+SADDLERY\s+SPORT", full_text, flags=re.I):
+        return []
+    if not re.search(r"Barcode\s+Item\s+No", full_text, flags=re.I):
+        return []
+
+    article_re = re.compile(
+        r"^(?P<barcode>\d{10,14})\s+"
+        r"(?P<article>\d{3,5}\s+[A-Z]{2,6}\s+[A-Z0-9]+)\b(?P<rest>.*)$",
+        flags=re.I,
+    )
+    value_re = re.compile(
+        r"\b(?P<quantity>\d+)\s+\$(?P<unit_price>\d[\d.,]*)\s+US\$(?P<amount>\d[\d,]*(?:\.\d{2})?)\s*$",
+        flags=re.I,
+    )
+
+    rows = []
+    pending: Optional[dict] = None
+
+    def append_row(page_number: int, line_number: int, pending_row: dict, value_match) -> None:
+        article = norm_key(pending_row["article"])
+        hs = mapping.get(article) or mapping.get(compact_key(article))
+        if not hs:
+            return
+        raw_text = norm_text(" ".join(pending_row["parts"]))
+        rows.append(
+            {
+                "page": pending_row["page"],
+                "line": pending_row["line"],
+                "article": article,
+                "lookup_article": article,
+                "hs_code": hs,
+                "quantity": value_match.group("quantity"),
+                "unit_price": value_match.group("unit_price"),
+                "amount": value_match.group("amount"),
+                "skip_value_fallback": True,
+                "raw_text": raw_text,
+                "text": raw_text,
+            }
+        )
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        if is_packing_list_page(text):
+            continue
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            text_line = norm_text(line).strip()
+            if not text_line:
+                continue
+            if re.match(r"^(TOTAL\s+AMOUNT|SAY\s+TOTAL|Balance\b)", text_line, flags=re.I):
+                pending = None
+                continue
+
+            article_match = article_re.match(text_line)
+            if article_match:
+                pending = {
+                    "page": page_number,
+                    "line": line_number,
+                    "article": article_match.group("article"),
+                    "parts": [text_line],
+                }
+                value_match = value_re.search(article_match.group("rest"))
+                if value_match:
+                    append_row(page_number, line_number, pending, value_match)
+                    pending = None
+                continue
+
+            if not pending:
+                continue
+
+            pending["parts"].append(text_line)
+            combined = " ".join(pending["parts"])
+            value_match = value_re.search(combined)
+            if value_match:
+                append_row(page_number, line_number, pending, value_match)
+                pending = None
+
+    return rows
+
+
 def extract_pdf_articles_from_changzhou_ziyuan_rows(reader: PdfReader, mapping: Dict[str, str]) -> List[dict]:
     full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
     if not re.search(r"CHANGZHOU\s+ZIYUAN\s+SPORTS", full_text, flags=re.I):
@@ -2895,6 +2977,9 @@ def extract_pdf_articles(input_pdf: Path, mapping_csv: Path) -> List[dict]:
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_quanzhou_xingye(reader, mapping)
+    if rows:
+        return enrich_pdf_rows(rows, names)
+    rows = extract_pdf_articles_from_xiamen_grassland(reader, mapping)
     if rows:
         return enrich_pdf_rows(rows, names)
     rows = extract_pdf_articles_from_changzhou_ziyuan_rows(reader, mapping)
