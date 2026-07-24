@@ -35,6 +35,8 @@ ARTICLE_HEADERS = {
     "buyer article no.",
     "item no",
     "item no.",
+    "hm item number",
+    "hm item no",
     "qhp item no",
     "qhp item no.",
     "stockcode item qhp",
